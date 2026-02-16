@@ -1,0 +1,9 @@
+target/
+.data/
+web/node_modules/
+web/dist/
+test_data/
+.git/
+.claude/
+.gitignore
+*.md

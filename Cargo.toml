@@ -1,0 +1,38 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/ggoggam/openxet"
+
+[workspace.dependencies]
+# Hashing
+blake3 = "1"
+
+# Compression
+lz4_flex = "0.11"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Bytes
+bytes = "1"
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Hex encoding
+hex = "0.4"
+
+# HMAC
+hmac = "0.12"
+sha2 = "0.10"
+
+# Internal crates
+openxet-hashing = { path = "crates/hashing" }
+openxet-chunking = { path = "crates/chunking" }
+openxet-cas-types = { path = "crates/cas_types" }
