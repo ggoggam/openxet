@@ -21,11 +21,14 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Initialize tracing with JSON output for OTel-compatible structured logging
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_target(true)
+        .with_current_span(true)
         .init();
 
     // Parse CLI and load config
