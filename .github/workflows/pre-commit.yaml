@@ -27,12 +27,12 @@ jobs:
           token: ${{ steps.app-token.outputs.token }}
 
       - uses: jdx/mise-action@v3
-        with:
-          mise_toml: |
-            [tools]
-            rust = { version = "latest", profile = "default" }
 
-      - run: rustup show profile
+      - run: |
+          rustup show profile
+          rustup component add rustfmt
+          rustup component add clippy
+          rustup component list
 
       - uses: actions/cache@v5
         with:
