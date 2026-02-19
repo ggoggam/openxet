@@ -50,6 +50,12 @@ pub trait StorageBackend: Send + Sync {
         hash: &str,
         data: Bytes,
     ) -> impl Future<Output = Result<bool, StorageError>> + Send;
+
+    /// List all xorbs as (hash, file_size_bytes) pairs.
+    fn list_xorbs(&self) -> impl Future<Output = Result<Vec<(String, u64)>, StorageError>> + Send;
+
+    /// List all shards as (hash, file_size_bytes) pairs.
+    fn list_shards(&self) -> impl Future<Output = Result<Vec<(String, u64)>, StorageError>> + Send;
 }
 
 #[cfg(test)]

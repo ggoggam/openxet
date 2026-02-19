@@ -117,18 +117,6 @@ async fn put_if_absent(path: &Path, data: &Bytes) -> Result<bool, StorageError> 
     Ok(true)
 }
 
-impl FilesystemBackend {
-    /// List all xorbs as (hash, file_size_bytes) pairs.
-    pub async fn list_xorbs(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        list_dir_entries(&self.xorb_dir).await
-    }
-
-    /// List all shards as (hash, file_size_bytes) pairs.
-    pub async fn list_shards(&self) -> Result<Vec<(String, u64)>, StorageError> {
-        list_dir_entries(&self.shard_dir).await
-    }
-}
-
 /// List files in a directory, returning (filename, file_size) pairs.
 /// Skips hidden files and directories.
 async fn list_dir_entries(dir: &Path) -> Result<Vec<(String, u64)>, StorageError> {
@@ -191,6 +179,14 @@ impl StorageBackend for FilesystemBackend {
     async fn put_shard(&self, hash: &str, data: Bytes) -> Result<bool, StorageError> {
         validate_hash(hash)?;
         put_if_absent(&self.shard_dir.join(hash), &data).await
+    }
+
+    async fn list_xorbs(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        list_dir_entries(&self.xorb_dir).await
+    }
+
+    async fn list_shards(&self) -> Result<Vec<(String, u64)>, StorageError> {
+        list_dir_entries(&self.shard_dir).await
     }
 }
 

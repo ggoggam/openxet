@@ -22,9 +22,25 @@ impl FilesystemFileIndex {
     }
 }
 
-impl FilesystemFileIndex {
-    /// List all file index entries as (file_hash, shard_hash) pairs.
-    pub async fn list_all(&self) -> Result<Vec<(String, String)>, StorageError> {
+impl FileIndex for FilesystemFileIndex {
+    async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
+        validate_hash(file_hash)?;
+        let path = self.dir.join(file_hash);
+        match tokio::fs::read_to_string(&path).await {
+            Ok(contents) => Ok(Some(contents.trim().to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(StorageError::io(e, path)),
+        }
+    }
+
+    async fn put(&self, file_hash: &str, shard_hash: &str) -> Result<(), StorageError> {
+        validate_hash(file_hash)?;
+        validate_hash(shard_hash)?;
+        let path = self.dir.join(file_hash);
+        super::super::filesystem::atomic_write(&path, shard_hash.as_bytes()).await
+    }
+
+    async fn list_all(&self) -> Result<Vec<(String, String)>, StorageError> {
         let mut entries = Vec::new();
         let mut read_dir = tokio::fs::read_dir(&self.dir)
             .await
@@ -46,25 +62,6 @@ impl FilesystemFileIndex {
 
         entries.sort_by(|a, b| a.0.cmp(&b.0));
         Ok(entries)
-    }
-}
-
-impl FileIndex for FilesystemFileIndex {
-    async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
-        validate_hash(file_hash)?;
-        let path = self.dir.join(file_hash);
-        match tokio::fs::read_to_string(&path).await {
-            Ok(contents) => Ok(Some(contents.trim().to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(StorageError::io(e, path)),
-        }
-    }
-
-    async fn put(&self, file_hash: &str, shard_hash: &str) -> Result<(), StorageError> {
-        validate_hash(file_hash)?;
-        validate_hash(shard_hash)?;
-        let path = self.dir.join(file_hash);
-        super::super::filesystem::atomic_write(&path, shard_hash.as_bytes()).await
     }
 }
 

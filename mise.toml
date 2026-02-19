@@ -30,13 +30,18 @@ print(token)
 
 [tasks.docker-up]
 description = "Bring up docker compose services"
-run = "docker compose -f docker/compose.yaml up -d --build --force-recreate --remove-orphans"
+run = "docker compose -f docker/compose.minio.yaml up -d --build --force-recreate --remove-orphans"
 alias = "up"
 
 [tasks.docker-down]
 description = "bring down docker compose services"
-run = "docker compose -f docker/compose.yaml down --remove-orphans"
+run = "docker compose -f docker/compose.minio.yaml down --remove-orphans"
 alias = "down"
+
+[tasks.docker-log]
+description = "view docker lgos"
+run = "docker compose -f docker/compose.minio.yaml logs --tail 100"
+alias = "log"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 

@@ -33,6 +33,9 @@ pub trait FileIndex: Send + Sync {
         file_hash: &str,
         shard_hash: &str,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// List all file index entries as (file_hash, shard_hash) pairs.
+    fn list_all(&self) -> impl Future<Output = Result<Vec<(String, String)>, StorageError>> + Send;
 }
 
 /// Index mapping chunk hashes to their locations in xorbs.

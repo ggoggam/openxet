@@ -44,6 +44,23 @@ pub struct ServerConfig {
 pub struct StorageConfig {
     pub backend: String,
     pub data_dir: PathBuf,
+
+    // S3 / MinIO
+    pub s3_bucket: Option<String>,
+    pub s3_region: Option<String>,
+    pub s3_endpoint: Option<String>,
+    pub s3_access_key_id: Option<String>,
+    pub s3_secret_access_key: Option<String>,
+    pub s3_allow_http: Option<bool>,
+
+    // GCS
+    pub gcs_bucket: Option<String>,
+    pub gcs_service_account_path: Option<String>,
+
+    // Azure Blob Storage
+    pub azure_container: Option<String>,
+    pub azure_account: Option<String>,
+    pub azure_access_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,6 +85,17 @@ impl Default for StorageConfig {
         Self {
             backend: "filesystem".to_string(),
             data_dir: PathBuf::from("./.data"),
+            s3_bucket: None,
+            s3_region: None,
+            s3_endpoint: None,
+            s3_access_key_id: None,
+            s3_secret_access_key: None,
+            s3_allow_http: None,
+            gcs_bucket: None,
+            gcs_service_account_path: None,
+            azure_container: None,
+            azure_account: None,
+            azure_access_key: None,
         }
     }
 }
@@ -124,6 +152,42 @@ impl AppConfig {
         }
         if let Ok(frontend_dir) = std::env::var("OPENXET_FRONTEND_DIR") {
             self.server.frontend_dir = PathBuf::from(frontend_dir);
+        }
+        if let Ok(backend) = std::env::var("OPENXET_STORAGE_BACKEND") {
+            self.storage.backend = backend;
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_BUCKET") {
+            self.storage.s3_bucket = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_REGION") {
+            self.storage.s3_region = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_ENDPOINT") {
+            self.storage.s3_endpoint = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_ACCESS_KEY_ID") {
+            self.storage.s3_access_key_id = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_SECRET_ACCESS_KEY") {
+            self.storage.s3_secret_access_key = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_ALLOW_HTTP") {
+            self.storage.s3_allow_http = Some(v == "true" || v == "1");
+        }
+        if let Ok(v) = std::env::var("OPENXET_GCS_BUCKET") {
+            self.storage.gcs_bucket = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_GCS_SERVICE_ACCOUNT_PATH") {
+            self.storage.gcs_service_account_path = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_AZURE_CONTAINER") {
+            self.storage.azure_container = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_AZURE_ACCOUNT") {
+            self.storage.azure_account = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_AZURE_ACCESS_KEY") {
+            self.storage.azure_access_key = Some(v);
         }
         if let Ok(secret) = std::env::var("OPENXET_AUTH_SECRET") {
             self.auth.secret = secret;

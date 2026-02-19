@@ -14,6 +14,9 @@ pub enum StorageError {
 
     #[error("data too large: {size} bytes (max {max})")]
     TooLarge { size: usize, max: usize },
+
+    #[error("object store error: {0}")]
+    ObjectStore(String),
 }
 
 impl StorageError {
