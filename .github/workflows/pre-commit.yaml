@@ -48,5 +48,6 @@ jobs:
             --hook-stage=manual
 
       - uses: stefanzweifel/git-auto-commit-action@v7
+        if: ${{ ! cancelled() }}
         with:
           commit_message: "style: auto-fix formatting"
