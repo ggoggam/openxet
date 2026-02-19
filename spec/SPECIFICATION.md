@@ -401,7 +401,7 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-API/no
 ### Phase 4: Frontend (`frontend/`)
 
 17. Vite + React + TypeScript + TailwindCSS scaffold
-  a. Stick with commonly used UI lib such as ShadCN. 
+  a. Stick with commonly used UI lib such as ShadCN.
   b. Use Tanstack router for file-based routing.
 18. Dashboard, Files list, File detail pages
   a. Should bear similarities with Github UI.
