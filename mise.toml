@@ -1,5 +1,5 @@
 [tools]
-rust = { version = "latest", components = "rustfmt,clippy" }
+rust = "latest"
 bun = "latest"
 pre-commit = "latest"
 watchexec = "latest"
