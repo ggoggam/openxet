@@ -4,11 +4,16 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: write
+
 jobs:
   pre-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
 
       - uses: jdx/mise-action@v3
 
@@ -23,9 +28,14 @@ jobs:
           restore-keys: |
             pre-commit-${{ runner.os }}-
 
-      - run: |
+      - name: Run pre-commit checks
+        run: |
           pre-commit run \
             --show-diff-on-failure \
             --color=always \
             --all-files \
             --hook-stage=manual
+
+      - uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "style: auto-fix formatting"
