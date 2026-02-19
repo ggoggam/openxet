@@ -20,6 +20,11 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Button } from "@/components/ui/button";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { Play, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 
 type TableFormat = "csv" | "tsv" | "parquet";
@@ -31,6 +36,10 @@ interface QueryResult {
   rows: (string | null)[][];
   rowCount: number;
   durationMs: number;
+  /** Column indices that contain HuggingFace image structs (rendered as <img>). */
+  imageColumns: Set<number>;
+  /** Truncated raw JSON for image cells, keyed by "row-col". */
+  imageRawJson: Map<string, string>;
 }
 
 function useDuckDBQuery(bytes: Uint8Array, format: TableFormat) {
@@ -93,6 +102,70 @@ function useDuckDBQuery(bytes: Uint8Array, format: TableFormat) {
   return { result, error, loading, runQuery };
 }
 
+/** Sniff MIME type from the first bytes of an image buffer. */
+function detectImageMime(bytes: Uint8Array): string | null {
+  if (
+    bytes.length >= 8 &&
+    bytes[0] === 0x89 &&
+    bytes[1] === 0x50 &&
+    bytes[2] === 0x4e &&
+    bytes[3] === 0x47
+  )
+    return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8)
+    return "image/jpeg";
+  if (
+    bytes.length >= 4 &&
+    bytes[0] === 0x47 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46
+  )
+    return "image/gif";
+  if (
+    bytes.length >= 12 &&
+    bytes[0] === 0x52 &&
+    bytes[1] === 0x49 &&
+    bytes[2] === 0x46 &&
+    bytes[3] === 0x46 &&
+    bytes[8] === 0x57
+  )
+    return "image/webp";
+  return null;
+}
+
+/**
+ * Build a truncated JSON representation of an image struct.
+ * The `bytes` array is abbreviated to keep the string short.
+ */
+function truncatedImageJson(val: Record<string, unknown>, maxLen = 120): string {
+  // Build a shallow copy replacing bytes with a placeholder
+  const clone: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(val)) {
+    if (v instanceof Uint8Array) {
+      const preview = Array.from(v.slice(0, 8)).join(", ");
+      clone[k] = `__BYTES_PLACEHOLDER_[${preview}, ...](${v.length} bytes)`;
+    } else {
+      clone[k] = v;
+    }
+  }
+  let json = JSON.stringify(clone);
+  // Unwrap the placeholder quotes so it reads naturally
+  json = json.replace(/"__BYTES_PLACEHOLDER_(.+?)"/g, "$1");
+  if (json.length > maxLen) {
+    json = json.slice(0, maxLen - 1) + "\u2026";
+  }
+  return json;
+}
+
+/** Convert a Uint8Array to a base64 data-URL with the given MIME type. */
+function uint8ToDataUrl(bytes: Uint8Array, mime: string): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i++) {
+    binary += String.fromCharCode(bytes[i]);
+  }
+  return `data:${mime};base64,${btoa(binary)}`;
+}
+
 async function executeQuery(
   querySql: string,
   conn: Awaited<ReturnType<Awaited<ReturnType<typeof getDuckDB>>["connect"]>>,
@@ -108,18 +181,34 @@ async function executeQuery(
     const durationMs = performance.now() - start;
 
     const columns = table.schema.fields.map((f) => f.name);
+    const imageColumns = new Set<number>();
+    const imageRawJson = new Map<string, string>();
     const rows: (string | null)[][] = [];
     for (let i = 0; i < table.numRows; i++) {
       const row = table.get(i);
       rows.push(
-        columns.map((col) => {
+        columns.map((col, colIdx) => {
           const val = row?.[col];
-          return val === null || val === undefined ? null : String(val);
+          if (val === null || val === undefined) return null;
+
+          // Detect HuggingFace image struct: {bytes: Uint8Array, path: string}
+          if (val !== null && typeof val === "object") {
+            const rec = val as Record<string, unknown>;
+            const maybeBytes = rec.bytes;
+            if (maybeBytes instanceof Uint8Array && maybeBytes.length > 0) {
+              imageColumns.add(colIdx);
+              imageRawJson.set(`${i}-${colIdx}`, truncatedImageJson(rec));
+              const mime = detectImageMime(maybeBytes) ?? "image/png";
+              return uint8ToDataUrl(maybeBytes, mime);
+            }
+          }
+
+          return String(val);
         }),
       );
     }
 
-    setResult({ columns, rows, rowCount: table.numRows, durationMs });
+    setResult({ columns, rows, rowCount: table.numRows, durationMs, imageColumns, imageRawJson });
   } catch (e) {
     setError(e instanceof Error ? e.message : String(e));
   } finally {
@@ -154,7 +243,7 @@ function SqlEditor({
       },
     ]);
 
-    const extensions = [basicSetup, sql(), runKeymap];
+    const extensions = [runKeymap, basicSetup, sql()];
     if (isDark) extensions.push(oneDark);
 
     const view = new EditorView({
@@ -231,10 +320,30 @@ function QueryResults({ result }: { result: QueryResult }) {
                 {row.map((cell, j) => (
                   <TableCell
                     key={j}
-                    className="font-mono text-xs max-w-64 truncate"
+                    className={
+                      result.imageColumns.has(j)
+                        ? "p-1"
+                        : "font-mono text-xs max-w-64 truncate"
+                    }
                   >
                     {cell === null ? (
                       <span className="text-muted-foreground/50">NULL</span>
+                    ) : result.imageColumns.has(j) ? (
+                      <Tooltip>
+                        <TooltipTrigger asChild>
+                          <img
+                            src={cell}
+                            alt=""
+                            className="h-16 w-auto object-contain rounded"
+                          />
+                        </TooltipTrigger>
+                        <TooltipContent
+                          side="bottom"
+                          className="max-w-sm font-mono text-xs break-all"
+                        >
+                          {result.imageRawJson.get(`${start + i}-${j}`)}
+                        </TooltipContent>
+                      </Tooltip>
                     ) : (
                       cell
                     )}
