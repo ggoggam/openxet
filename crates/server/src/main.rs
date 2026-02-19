@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use openxet_server::config::{AppConfig, Cli};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{FilesystemBackend, FilesystemChunkIndex, FilesystemFileIndex};
+use openxet_server::storage::{FilesystemChunkIndex, FilesystemFileIndex, build_storage};
 
 /// Upload sessions older than this are cleaned up automatically.
 const UPLOAD_SESSION_TTL: Duration = Duration::from_secs(30 * 60); // 30 minutes
@@ -21,11 +21,14 @@ const CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize tracing
+    // Initialize tracing with JSON output for OTel-compatible structured logging
     tracing_subscriber::fmt()
+        .json()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_target(true)
+        .with_current_span(true)
         .init();
 
     // Parse CLI and load config
@@ -41,7 +44,7 @@ async fn main() -> Result<()> {
 
     // Initialize storage
     let data_dir = config.data_dir();
-    let storage = Arc::new(FilesystemBackend::new(data_dir).await?);
+    let storage = Arc::new(build_storage(&config.storage).await?);
     let file_index = Arc::new(FilesystemFileIndex::new(data_dir).await?);
     let chunk_index = Arc::new(FilesystemChunkIndex::new(data_dir).await?);
 

@@ -20,7 +20,7 @@ COPY web/ .
 RUN bun run build
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────────
-FROM debian:bookworm-slim
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 

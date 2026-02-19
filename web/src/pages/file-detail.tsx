@@ -41,9 +41,7 @@ function looksLikeText(buf: Uint8Array): boolean {
   return true;
 }
 
-const LazyTablePreview = React.lazy(
-  () => import("@/components/table-preview"),
-);
+const LazyTablePreview = React.lazy(() => import("@/components/table-preview"));
 
 type DetectedContent =
   | { kind: "image"; mime: string; label: string; bytes: Uint8Array }
@@ -170,7 +168,10 @@ function detectContentType(buf: Uint8Array): DetectedContent {
 
     // SVG: check for <svg tag
     const trimmed = text.trimStart().toLowerCase();
-    if (trimmed.startsWith("<svg") || (trimmed.startsWith("<?xml") && trimmed.includes("<svg"))) {
+    if (
+      trimmed.startsWith("<svg") ||
+      (trimmed.startsWith("<?xml") && trimmed.includes("<svg"))
+    ) {
       return {
         kind: "image",
         mime: "image/svg+xml",
@@ -231,7 +232,9 @@ function ImagePreview({ bytes, mime }: { bytes: Uint8Array; mime: string }) {
 
 function PdfPreview({ bytes }: { bytes: Uint8Array }) {
   const url = useMemo(() => {
-    const blob = new Blob([bytes.buffer as ArrayBuffer], { type: "application/pdf" });
+    const blob = new Blob([bytes.buffer as ArrayBuffer], {
+      type: "application/pdf",
+    });
     return URL.createObjectURL(blob);
   }, [bytes]);
 
@@ -281,21 +284,15 @@ function TextPreview({
       </div>
       {truncated && (
         <p className="mt-2 text-xs text-muted-foreground">
-          Showing first {formatBytes(TEXT_PREVIEW_LIMIT)} of{" "}
-          {formatBytes(size)}. Download to see the full file.
+          Showing first {formatBytes(TEXT_PREVIEW_LIMIT)} of {formatBytes(size)}
+          . Download to see the full file.
         </p>
       )}
     </div>
   );
 }
 
-function HexDumpPreview({
-  bytes,
-  size,
-}: {
-  bytes: Uint8Array;
-  size: number;
-}) {
+function HexDumpPreview({ bytes, size }: { bytes: Uint8Array; size: number }) {
   const rows: string[] = [];
   const limit = Math.min(bytes.length, HEX_DUMP_BYTES);
 
@@ -352,7 +349,9 @@ function FileContentPreview({ hash }: { hash: string }) {
 
   const detected = useMemo(() => {
     if (!data) return null;
-    const bytes = new Uint8Array(data);
+    // Copy the buffer so downstream consumers (e.g. DuckDB registerFileBuffer)
+    // that transfer/detach the ArrayBuffer don't corrupt React Query's cache.
+    const bytes = new Uint8Array(data.slice(0));
     return detectContentType(bytes);
   }, [data]);
 

@@ -23,13 +23,16 @@ hex = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
 jsonwebtoken = "9"
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
 rand = "0.8"
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+url = "2"
+futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

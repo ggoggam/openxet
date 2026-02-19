@@ -69,6 +69,9 @@ impl From<StorageError> for AppError {
                 path.display(),
                 source
             )),
+            StorageError::ObjectStore(msg) => {
+                AppError::Internal(anyhow::anyhow!("object store error: {msg}"))
+            }
         }
     }
 }

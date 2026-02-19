@@ -1,0 +1,60 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - .minio:/.data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: >
+      /bin/sh -c "
+      sleep 3;
+      mc alias set local http://minio:9000 minioadmin minioadmin;
+      mc mb --ignore-existing local/openxet;
+      exit 0;
+      "
+
+  openxet:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      minio-init:
+        condition: service_completed_successfully
+    volumes:
+      - .data:/.data
+    environment:
+      OPENXET_HOST: "0.0.0.0"
+      OPENXET_PORT: "8080"
+      OPENXET_DATA_DIR: /.data
+      OPENXET_AUTH_SECRET: change-me-in-production
+      OPENXET_STORAGE_BACKEND: s3
+      OPENXET_S3_BUCKET: openxet
+      OPENXET_S3_REGION: us-east-1
+      OPENXET_S3_ENDPOINT: http://minio:9000
+      OPENXET_S3_ACCESS_KEY_ID: minioadmin
+      OPENXET_S3_SECRET_ACCESS_KEY: minioadmin
+      OPENXET_S3_ALLOW_HTTP: "true"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/stats"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s

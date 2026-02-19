@@ -21,7 +21,9 @@ use openxet_server::auth::{Claims, Scope, create_token};
 use openxet_server::config::AppConfig;
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{FilesystemBackend, FilesystemChunkIndex, FilesystemFileIndex};
+use openxet_server::storage::{
+    FilesystemBackend, FilesystemChunkIndex, FilesystemFileIndex, StorageDispatch,
+};
 
 const TEST_SECRET: &str = "test-secret";
 
@@ -57,6 +59,7 @@ impl TestServer {
             storage: openxet_server::config::StorageConfig {
                 backend: "filesystem".to_string(),
                 data_dir: data_dir.clone(),
+                ..Default::default()
             },
             auth: openxet_server::config::AuthConfig {
                 secret: TEST_SECRET.to_string(),
@@ -64,7 +67,9 @@ impl TestServer {
             },
         };
 
-        let storage = Arc::new(FilesystemBackend::new(&data_dir).await.unwrap());
+        let storage = Arc::new(StorageDispatch::Filesystem(
+            FilesystemBackend::new(&data_dir).await.unwrap(),
+        ));
         let file_index = Arc::new(FilesystemFileIndex::new(&data_dir).await.unwrap());
         let chunk_index = Arc::new(FilesystemChunkIndex::new(&data_dir).await.unwrap());
         let upload_sessions = Arc::new(Mutex::new(HashMap::new()));
