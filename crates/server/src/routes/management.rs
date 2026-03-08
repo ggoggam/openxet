@@ -1,7 +1,7 @@
 use axum::Json;
 use axum::Router;
 use axum::extract::{Path, State};
-use axum::http::header;
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::IntoResponse;
 use axum::routing::get;
 use bytes::Bytes;
@@ -203,6 +203,7 @@ fn compute_chunk_byte_offsets(xorb_data: &[u8]) -> Vec<(u64, u64)> {
 async fn get_file_content(
     State(state): State<AppState>,
     Path(hash): Path<String>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::storage::validate_hash;
 
@@ -247,10 +248,63 @@ async fn get_file_content(
         }
     }
 
-    Ok((
-        [(header::CONTENT_TYPE, "application/octet-stream")],
-        Bytes::from(file_bytes),
-    ))
+    let total_size = file_bytes.len() as u64;
+
+    // Handle Range header for partial content requests
+    if let Some(range_val) = headers.get(header::RANGE) {
+        let range_str = range_val
+            .to_str()
+            .map_err(|_| AppError::BadRequest("invalid range header".to_string()))?;
+
+        let range_str = range_str
+            .strip_prefix("bytes=")
+            .ok_or_else(|| AppError::BadRequest("range must start with 'bytes='".to_string()))?;
+
+        let (start_str, end_str) = range_str
+            .split_once('-')
+            .ok_or_else(|| AppError::BadRequest("invalid range format".to_string()))?;
+
+        let start: u64 = start_str
+            .parse()
+            .map_err(|_| AppError::BadRequest("invalid range start".to_string()))?;
+        let end: u64 = if end_str.is_empty() {
+            total_size - 1
+        } else {
+            end_str
+                .parse()
+                .map_err(|_| AppError::BadRequest("invalid range end".to_string()))?
+        };
+
+        if start > end || start >= total_size {
+            return Err(AppError::RangeNotSatisfiable);
+        }
+
+        let end = end.min(total_size - 1);
+        let slice = file_bytes[start as usize..=end as usize].to_vec();
+        let content_range = format!("bytes {start}-{end}/{total_size}");
+
+        Ok((
+            StatusCode::PARTIAL_CONTENT,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                (header::CONTENT_LENGTH, slice.len().to_string()),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (header::CONTENT_RANGE, content_range),
+            ],
+            slice,
+        ))
+    } else {
+        Ok((
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/octet-stream".to_string()),
+                (header::CONTENT_LENGTH, total_size.to_string()),
+                (header::ACCEPT_RANGES, "bytes".to_string()),
+                (header::CONTENT_RANGE, String::new()),
+            ],
+            file_bytes,
+        ))
+    }
 }
 
 // ─── GET /api/xorbs ──────────────────────────────────────────────────────────

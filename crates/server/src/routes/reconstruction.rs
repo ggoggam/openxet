@@ -17,7 +17,7 @@ use crate::state::AppState;
 use crate::storage::{FileIndex, StorageBackend, validate_hash};
 
 /// Parse an HTTP Range header of the form "bytes=start-end" (inclusive end).
-fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppError> {
+pub fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppError> {
     let Some(range_val) = headers.get("range") else {
         return Ok(None);
     };

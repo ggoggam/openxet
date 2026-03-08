@@ -99,6 +99,27 @@ export async function fetchFileContent(hash: string): Promise<ArrayBuffer> {
   return res.arrayBuffer();
 }
 
+/** Fetch a byte range from a file's content. */
+export async function fetchFileContentRange(
+  hash: string,
+  start: number,
+  end: number,
+): Promise<ArrayBuffer> {
+  const res = await fetch(`${BASE}/files/${hash}/content`, {
+    headers: { Range: `bytes=${start}-${end}` },
+  });
+  if (!res.ok && res.status !== 206) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(body.error || `HTTP ${res.status}`);
+  }
+  return res.arrayBuffer();
+}
+
+/** Returns the URL for streaming file content (supports HTTP Range requests). */
+export function fileContentUrl(hash: string): string {
+  return `${BASE}/files/${hash}/content`;
+}
+
 // ─── Multipart Upload ────────────────────────────────────────────────────────
 
 const PART_SIZE = 32 * 1024 * 1024; // 32 MiB

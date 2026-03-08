@@ -20,7 +20,12 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import { fetchFileDetail, fetchFileContent } from "@/lib/api";
+import {
+  fetchFileDetail,
+  fetchFileContent,
+  fetchFileContentRange,
+  fileContentUrl,
+} from "@/lib/api";
 import { formatBytes, truncateHash } from "@/lib/format";
 
 /** Max bytes we try to render as text in the preview. */
@@ -341,10 +346,40 @@ function HexDumpPreview({ bytes, size }: { bytes: Uint8Array; size: number }) {
   );
 }
 
-function FileContentPreview({ hash }: { hash: string }) {
+/** Probe first few bytes to check if a file is parquet (starts with "PAR1"). */
+function isParquetProbe(buf: Uint8Array): boolean {
+  return (
+    buf.length >= 4 &&
+    buf[0] === 0x50 &&
+    buf[1] === 0x41 &&
+    buf[2] === 0x52 &&
+    buf[3] === 0x31
+  );
+}
+
+function FileContentPreview({
+  hash,
+  totalSize,
+}: {
+  hash: string;
+  totalSize: number;
+}) {
+  // Probe the first 16 bytes to detect parquet before downloading the full file.
+  const probe = useQuery({
+    queryKey: ["file-content-probe", hash],
+    queryFn: () => fetchFileContentRange(hash, 0, 15),
+  });
+
+  const isParquet = useMemo(() => {
+    if (!probe.data) return false;
+    return isParquetProbe(new Uint8Array(probe.data));
+  }, [probe.data]);
+
+  // Only fetch full content for non-parquet files.
   const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", hash],
     queryFn: () => fetchFileContent(hash),
+    enabled: probe.isSuccess && !isParquet,
   });
 
   const detected = useMemo(() => {
@@ -366,7 +401,7 @@ function FileContentPreview({ hash }: { hash: string }) {
     URL.revokeObjectURL(url);
   };
 
-  if (error) {
+  if (probe.error || error) {
     return (
       <Card>
         <CardHeader>
@@ -374,12 +409,15 @@ function FileContentPreview({ hash }: { hash: string }) {
         </CardHeader>
         <CardContent>
           <p className="text-sm text-destructive">
-            Failed to load content: {error.message}
+            Failed to load content:{" "}
+            {(probe.error || error)?.message}
           </p>
         </CardContent>
       </Card>
     );
   }
+
+  const showLoading = probe.isLoading || (!isParquet && isLoading);
 
   return (
     <Card>
@@ -387,25 +425,26 @@ function FileContentPreview({ hash }: { hash: string }) {
         <div>
           <CardTitle className="text-lg flex items-center gap-2">
             Content
-            {detected && (
+            {isParquet && <Badge variant="secondary">Parquet</Badge>}
+            {detected && !isParquet && (
               <Badge variant="secondary">{contentLabel(detected)}</Badge>
             )}
           </CardTitle>
           <CardDescription>
-            {isLoading
+            {showLoading
               ? "Loading..."
-              : detected
-                ? formatBytes(
-                    detected.kind === "text"
-                      ? detected.size
-                      : detected.kind === "binary"
+              : formatBytes(
+                  isParquet
+                    ? totalSize
+                    : detected
+                      ? detected.kind === "text" || detected.kind === "binary"
                         ? detected.size
-                        : detected.bytes.length,
-                  )
-                : null}
+                        : detected.bytes.length
+                      : 0,
+                )}
           </CardDescription>
         </div>
-        {data && (
+        {data && !isParquet && (
           <Button variant="outline" size="sm" onClick={handleDownload}>
             <Download className="mr-1.5 size-4" />
             Download
@@ -413,12 +452,25 @@ function FileContentPreview({ hash }: { hash: string }) {
         )}
       </CardHeader>
       <CardContent>
-        {isLoading ? (
+        {showLoading ? (
           <div className="space-y-2">
             <Skeleton className="h-4 w-full" />
             <Skeleton className="h-4 w-3/4" />
             <Skeleton className="h-4 w-5/6" />
           </div>
+        ) : isParquet ? (
+          <Suspense
+            fallback={
+              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                Loading table viewer...
+              </div>
+            }
+          >
+            <LazyTablePreview
+              format="parquet"
+              contentUrl={fileContentUrl(hash)}
+            />
+          </Suspense>
         ) : detected?.kind === "image" ? (
           <ImagePreview bytes={detected.bytes} mime={detected.mime} />
         ) : detected?.kind === "pdf" ? (
@@ -519,7 +571,7 @@ export function FileDetailPage() {
             </Card>
           </div>
 
-          <FileContentPreview hash={hash} />
+          <FileContentPreview hash={hash} totalSize={data.total_size} />
 
           <div>
             <h2 className="mb-3 text-lg font-semibold">Reconstruction Terms</h2>

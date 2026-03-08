@@ -42,7 +42,15 @@ interface QueryResult {
   imageRawJson: Map<string, string>;
 }
 
-function useDuckDBQuery(bytes: Uint8Array, format: TableFormat) {
+interface DuckDBQueryOptions {
+  format: TableFormat;
+  /** In-memory file bytes. Required for CSV/TSV; optional for parquet. */
+  bytes?: Uint8Array;
+  /** URL for HTTP Range-based streaming. Used for parquet when bytes is not provided. */
+  contentUrl?: string;
+}
+
+function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -60,17 +68,33 @@ function useDuckDBQuery(bytes: Uint8Array, format: TableFormat) {
         const conn = await db.connect();
         connRef.current = conn;
 
-        const filename =
-          format === "parquet" ? "data.parquet" : `data.${format}`;
-        await db.registerFileBuffer(filename, bytes);
-
         let viewSql: string;
-        if (format === "parquet") {
+
+        if (format === "parquet" && contentUrl && !bytes) {
+          // Stream parquet via HTTP Range requests — no full download needed.
+          const filename = "data.parquet";
+          await db.registerFileURL(
+            filename,
+            contentUrl,
+            4, // DuckDBDataProtocol.HTTP
+            false,
+          );
           viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('${filename}')`;
+        } else if (bytes) {
+          const filename =
+            format === "parquet" ? "data.parquet" : `data.${format}`;
+          await db.registerFileBuffer(filename, bytes);
+
+          if (format === "parquet") {
+            viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('${filename}')`;
+          } else {
+            const delim = format === "tsv" ? "\\t" : ",";
+            viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv('${filename}', delim='${delim}', header=true, auto_detect=true)`;
+          }
         } else {
-          const delim = format === "tsv" ? "\\t" : ",";
-          viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv('${filename}', delim='${delim}', header=true, auto_detect=true)`;
+          throw new Error("Either bytes or contentUrl must be provided");
         }
+
         await conn.query(viewSql);
         readyRef.current = true;
 
@@ -91,7 +115,7 @@ function useDuckDBQuery(bytes: Uint8Array, format: TableFormat) {
       connRef.current = null;
       readyRef.current = false;
     };
-  }, [bytes, format]);
+  }, [bytes, format, contentUrl]);
 
   const runQuery = useCallback(async (querySql: string) => {
     const conn = connRef.current;
@@ -393,11 +417,17 @@ function QueryResults({ result }: { result: QueryResult }) {
 export default function TablePreview({
   bytes,
   format,
+  contentUrl,
 }: {
-  bytes: Uint8Array;
+  bytes?: Uint8Array;
   format: TableFormat;
+  contentUrl?: string;
 }) {
-  const { result, error, loading, runQuery } = useDuckDBQuery(bytes, format);
+  const { result, error, loading, runQuery } = useDuckDBQuery({
+    format,
+    bytes,
+    contentUrl,
+  });
 
   return (
     <div className="space-y-4">
