@@ -1,9 +1,9 @@
 [tools]
 rust = "latest"
 bun = "latest"
-pre-commit = "latest"
 watchexec = "latest"
 uv = "latest"
+prek = "latest"
 
 [env]
 HF_XET_ENDPOINT="http://localhost:8080"
