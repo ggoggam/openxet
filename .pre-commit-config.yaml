@@ -1,0 +1,36 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.bin$'
+      - id: end-of-file-fixer
+        exclude: '\.bin$'
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+
+  - repo: local
+    hooks:
+      - id: rust-fmt-check
+        name: rust format check
+        entry: mise run fmt-check
+        language: system
+        pass_filenames: false
+        types: [rust]
+
+      - id: rust-clippy
+        name: rust clippy
+        entry: mise run lint
+        language: system
+        pass_filenames: false
+        types: [rust]
+
+      - id: frontend-lint
+        name: frontend lint
+        entry: mise run fe-lint
+        language: system
+        pass_filenames: false
+        files: ^frontend/

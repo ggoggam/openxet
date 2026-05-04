@@ -1,0 +1,59 @@
+name: Pre-commit
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+permissions:
+  contents: write
+
+jobs:
+  pre-commit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.APP_ID }}
+          private-key: ${{ secrets.PRIVATE_KEY }}
+          owner: ggoggam
+          repositories: openxet
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.head_ref || github.ref_name }}
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: jdx/mise-action@v3
+
+      - run: |
+          rustup show profile
+          rustup component add rustfmt
+          rustup component add clippy
+          rustup component list | grep installed
+
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cache/prek
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: pre-commit-${{ runner.os }}-${{ hashFiles('.pre-commit-config.yaml', 'Cargo.lock') }}
+          restore-keys: |
+            pre-commit-${{ runner.os }}-
+
+      - name: Run pre-commit checks
+        run: |
+          prek run \
+            --show-diff-on-failure \
+            --color=always \
+            --all-files \
+            --hook-stage=manual
+
+      - uses: stefanzweifel/git-auto-commit-action@v7
+        if: ${{ ! cancelled() }}
+        with:
+          commit_message: "style: auto-fix formatting"

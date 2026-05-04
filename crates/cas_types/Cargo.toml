@@ -1,0 +1,19 @@
+[package]
+name = "openxet-cas-types"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+openxet-hashing = { workspace = true }
+bytes = { workspace = true }
+lz4_flex = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+
+[dev-dependencies]
+openxet-chunking = { workspace = true }

@@ -1,0 +1,40 @@
+[package]
+name = "openxet-server"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "openxet-server"
+path = "src/main.rs"
+
+[dependencies]
+openxet-hashing = { workspace = true }
+openxet-chunking = { workspace = true }
+openxet-cas-types = { workspace = true }
+tokio = { version = "1", features = ["full"] }
+bytes = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+blake3 = { workspace = true }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
+jsonwebtoken = "9"
+clap = { version = "4", features = ["derive"] }
+toml = "0.8"
+rand = "0.8"
+object_store = { version = "0.11", features = ["aws", "gcp", "azure"] }
+url = "2"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["full", "test-util"] }
+reqwest = { version = "0.12", features = ["json"] }
