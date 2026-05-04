@@ -16,7 +16,7 @@ repos:
     hooks:
       - id: rust-fmt-check
         name: rust format check
-        entry: mise run fmt-check
+        entry: mise run fmt:check
         language: system
         pass_filenames: false
         types: [rust]
@@ -30,7 +30,7 @@ repos:
 
       - id: frontend-lint
         name: frontend lint
-        entry: mise run fe-lint
+        entry: mise run fe:lint
         language: system
         pass_filenames: false
         files: ^frontend/

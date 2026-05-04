@@ -33,15 +33,9 @@ fn test_data_dir() -> PathBuf {
 /// Map our short reference name to the upstream filename in the HF dataset.
 fn upstream_filename(name: &str) -> &'static str {
     match name {
-        "chunk1.bin" => {
-            "b10aa1dc71c61661de92280c41a188aabc47981739b785724a099945d8dc5ce4.chunk"
-        }
-        "chunk2.bin" => {
-            "26255591fa803b6baf25d88c315b8a6f5153d5bcfdf18ec5ef526264e0ccc907.chunk"
-        }
-        "chunk3.bin" => {
-            "099cb228194fe640e36a6c7d274ee5ed3a714ccd557a0951d9b6b43a7292b5d1.chunk"
-        }
+        "chunk1.bin" => "b10aa1dc71c61661de92280c41a188aabc47981739b785724a099945d8dc5ce4.chunk",
+        "chunk2.bin" => "26255591fa803b6baf25d88c315b8a6f5153d5bcfdf18ec5ef526264e0ccc907.chunk",
+        "chunk3.bin" => "099cb228194fe640e36a6c7d274ee5ed3a714ccd557a0951d9b6b43a7292b5d1.chunk",
         "ev_data.csv" => "Electric_Vehicle_Population_Data_20250917.csv",
         "chunks.txt" => "Electric_Vehicle_Population_Data_20250917.csv.chunks",
         "xorb_hash.txt" => "Electric_Vehicle_Population_Data_20250917.csv.xet-xorb-hash",
@@ -49,9 +43,7 @@ fn upstream_filename(name: &str) -> &'static str {
         "range_hash.txt" => {
             "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb.range-hash"
         }
-        "reference.xorb" => {
-            "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb"
-        }
+        "reference.xorb" => "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb",
         "reference_shard_full.bin" => {
             "Electric_Vehicle_Population_Data_20250917.csv.shard.verification"
         }

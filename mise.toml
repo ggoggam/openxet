@@ -8,6 +8,10 @@ prek = "latest"
 [env]
 HF_XET_ENDPOINT="http://localhost:8080"
 
+[tasks."pre-commit"]
+description = "Run pre-commit checks via prek"
+run = "prek run --show-diff-on-failure --color=always --all-files --hook-stage=manual"
+
 [tasks.jwt]
 run = """
 #!/usr/bin/env -S uv run --script
@@ -45,12 +49,12 @@ alias = "log"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
-[tasks.build]
+[tasks."build"]
 description = "Build all crates (debug)"
 run = "cargo build"
 sources = ["Cargo.toml", "crates/**/Cargo.toml", "crates/**/*.rs"]
 
-[tasks.build-release]
+[tasks."build:release"]
 description = "Build all crates (release)"
 run = "cargo build --release"
 sources = ["Cargo.toml", "crates/**/Cargo.toml", "crates/**/*.rs"]
@@ -62,11 +66,11 @@ description = "Run all tests"
 run = "cargo test"
 env = { RUST_BACKTRACE = "1" }
 
-[tasks.test-unit]
+[tasks."test:unit"]
 description = "Run unit tests only"
 run = "cargo test --lib"
 
-[tasks.test-integration]
+[tasks."test:integration"]
 description = "Run integration tests only"
 run = "cargo test --test '*'"
 env = { RUST_BACKTRACE = "1" }
@@ -81,7 +85,7 @@ run = "cargo clippy -- -D warnings"
 description = "Format all Rust code"
 run = "cargo fmt --all"
 
-[tasks.fmt-check]
+[tasks."fmt:check"]
 description = "Check Rust formatting"
 run = "cargo fmt --all --check"
 
@@ -91,19 +95,19 @@ depends = ["fmt-check", "lint", "test"]
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 
-[tasks.fe-install]
+[tasks."fe:install"]
 description = "Install frontend dependencies"
 run = "bun install"
 dir = "web"
 
-[tasks.fe-build]
+[tasks."fe:build"]
 description = "Build frontend for production"
-depends = ["fe-install"]
+depends = ["fe:install"]
 sources = ["src/*"]
 run = "bun run build"
 dir = "web"
 
-[tasks.fe-lint]
+[tasks."fe:lint"]
 description = "Lint frontend code"
 run = "bun run lint"
 dir = "web"
@@ -112,7 +116,7 @@ dir = "web"
 
 [tasks.dev]
 description = "Run the server in debug mode"
-depends = ["build", "fe-build"]
+depends = ["build", "fe:build"]
 run = "cargo run"
 
 [tasks.clean]
