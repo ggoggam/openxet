@@ -71,7 +71,6 @@ openxet/
 │           └── verification.rs      # Term verification hash with VERIFICATION_KEY
 ├── web/                             # React frontend (TypeScript, Vite, TailwindCSS)
 ├── docker/                          # Dockerfile and Docker Compose
-├── test_data/                       # Reference files from xet-spec-reference-files
 └── spec/SPECIFICATION.md            # Full protocol specification
 ```
 

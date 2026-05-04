@@ -2,8 +2,13 @@
 //! xet-spec-reference-files from HuggingFace.
 //!
 //! Reference: https://huggingface.co/datasets/xet-team/xet-spec-reference-files
+//!
+//! Reference files are downloaded on first use into a temp directory and
+//! reused across runs. Set `OPENXET_TEST_DATA_DIR` to override the cache
+//! location, or pre-populate it to run offline.
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
+use std::sync::Mutex;
 
 use openxet_cas_types::shard::Shard;
 use openxet_cas_types::xorb;
@@ -13,10 +18,75 @@ use openxet_hashing::{
     compute_verification_hash,
 };
 
-const TEST_DATA_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../test_data");
+const HF_BASE_URL: &str =
+    "https://huggingface.co/datasets/xet-team/xet-spec-reference-files/resolve/main/";
 
-fn test_data_path(name: &str) -> std::path::PathBuf {
-    Path::new(TEST_DATA_DIR).join(name)
+static DOWNLOAD_LOCK: Mutex<()> = Mutex::new(());
+
+fn test_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("OPENXET_TEST_DATA_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::temp_dir().join("openxet-test-data")
+}
+
+/// Map our short reference name to the upstream filename in the HF dataset.
+fn upstream_filename(name: &str) -> &'static str {
+    match name {
+        "chunk1.bin" => {
+            "b10aa1dc71c61661de92280c41a188aabc47981739b785724a099945d8dc5ce4.chunk"
+        }
+        "chunk2.bin" => {
+            "26255591fa803b6baf25d88c315b8a6f5153d5bcfdf18ec5ef526264e0ccc907.chunk"
+        }
+        "chunk3.bin" => {
+            "099cb228194fe640e36a6c7d274ee5ed3a714ccd557a0951d9b6b43a7292b5d1.chunk"
+        }
+        "ev_data.csv" => "Electric_Vehicle_Population_Data_20250917.csv",
+        "chunks.txt" => "Electric_Vehicle_Population_Data_20250917.csv.chunks",
+        "xorb_hash.txt" => "Electric_Vehicle_Population_Data_20250917.csv.xet-xorb-hash",
+        "file_hash.txt" => "Electric_Vehicle_Population_Data_20250917.csv.xet-file-hash",
+        "range_hash.txt" => {
+            "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb.range-hash"
+        }
+        "reference.xorb" => {
+            "eea25d6ee393ccae385820daed127b96ef0ea034dfb7cf6da3a950ce334b7632.xorb"
+        }
+        "reference_shard_full.bin" => {
+            "Electric_Vehicle_Population_Data_20250917.csv.shard.verification"
+        }
+        "reference_shard_nofooter.bin" => {
+            "Electric_Vehicle_Population_Data_20250917.csv.shard.verification-no-footer"
+        }
+        "reference_shard_dedupe.bin" => {
+            "Electric_Vehicle_Population_Data_20250917.csv.shard.dedupe"
+        }
+        other => panic!("unknown reference file: {other}"),
+    }
+}
+
+fn test_data_path(name: &str) -> PathBuf {
+    let path = test_data_dir().join(name);
+    if path.exists() {
+        return path;
+    }
+
+    let _guard = DOWNLOAD_LOCK.lock().unwrap();
+    if path.exists() {
+        return path;
+    }
+
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let url = format!("{HF_BASE_URL}{}", upstream_filename(name));
+    let bytes = reqwest::blocking::get(&url)
+        .and_then(|r| r.error_for_status())
+        .and_then(|r| r.bytes())
+        .unwrap_or_else(|e| panic!("failed to download {url}: {e}"));
+
+    let tmp = path.with_extension("download");
+    fs::write(&tmp, &bytes).unwrap();
+    fs::rename(&tmp, &path).unwrap();
+    path
 }
 
 /// Parse the chunks.txt reference file into a list of (hash_hex, size) pairs.

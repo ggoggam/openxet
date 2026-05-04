@@ -75,8 +75,7 @@ openxet/
 │   └── server/        # HTTP server (axum) with auth, storage, and management API
 ├── web/               # React frontend (TypeScript, Vite, TailwindCSS)
 ├── docker/            # Dockerfile and Docker Compose
-├── spec/              # Protocol specification
-└── test_data/         # Reference files from xet-spec-reference-files
+└── spec/              # Protocol specification
 ```
 
 ### Crate Dependency Graph
@@ -196,7 +195,7 @@ mise run down            # Docker compose down
 
 ### Reference Test Data
 
-Integration tests validate against official reference files from the [xet-spec-reference-files](https://huggingface.co/datasets/xet-team/xet-spec-reference-files) dataset on HuggingFace. These live in `test_data/` and cover chunk hashing, file hashing, merkle tree construction, and xorb/shard deserialization.
+Integration tests validate against official reference files from the [xet-spec-reference-files](https://huggingface.co/datasets/xet-team/xet-spec-reference-files) dataset on HuggingFace. The files are downloaded on first run into a temp directory (override with `OPENXET_TEST_DATA_DIR`) and cover chunk hashing, file hashing, merkle tree construction, and xorb/shard deserialization.
 
 ## License
 
