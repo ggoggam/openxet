@@ -1279,6 +1279,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "openxet-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hex",
+ "hmac",
+ "jsonwebtoken",
+ "openxet-cas-types",
+ "openxet-chunking",
+ "openxet-hashing",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "openxet-hashing"
 version = "0.1.0"
 dependencies = [

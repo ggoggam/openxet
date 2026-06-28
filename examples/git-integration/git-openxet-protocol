@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+#
+# git-openxet-protocol — a Git clean/smudge filter that drives the real Xet
+# wire protocol (/v1/*) via the `openxet-client` binary, giving CHUNK-LEVEL,
+# cross-revision deduplication (the same model HuggingFace's hf_xet uses).
+#
+# Contrast with the sibling `git-openxet` filter, which uses the simpler
+# `/api/upload` endpoint and dedups at whole-xorb granularity.
+#
+#   • clean  (git add):      file bytes on stdin  -> openxet-client put -> pointer
+#   • smudge (git checkout): pointer on stdin     -> openxet-client get -> bytes
+#
+# Pointer format stored in git:
+#     version https://openxet/spec/v1
+#     xet-file-hash <64-hex>
+#     size <bytes>
+#
+# Configuration (env):
+#     OPENXET_URL          CAS base URL            (default http://127.0.0.1:8080)
+#     OPENXET_AUTH_SECRET  JWT secret; MUST match the server
+#     OPENXET_CLIENT       path to openxet-client  (default: `openxet-client` on PATH)
+#
+# Requirements: bash, the openxet-client binary (cargo build -p openxet-client).
+set -euo pipefail
+
+POINTER_VERSION="https://openxet/spec/v1"
+CLIENT="${OPENXET_CLIENT:-openxet-client}"
+
+cmd_clean() {
+  # stdin = real bytes. Buffer to a temp file so we can report the size, then
+  # upload via the protocol client (chunk + dedup query + xorb/shard upload).
+  local tmp hash size
+  tmp="$(mktemp)"
+  trap 'rm -f "$tmp"' RETURN
+  cat > "$tmp"
+  size="$(wc -c < "$tmp" | tr -d ' ')"
+  hash="$("$CLIENT" put "$tmp")"
+  printf '%s\n' "$POINTER_VERSION"
+  printf 'xet-file-hash %s\n' "$hash"
+  printf 'size %s\n' "$size"
+}
+
+cmd_smudge() {
+  local first rest hash
+  IFS= read -r first || true
+  if [[ "$first" != "$POINTER_VERSION" ]]; then
+    [[ -n "${first+x}" ]] && printf '%s\n' "$first"
+    cat
+    return 0
+  fi
+  rest="$(cat)"
+  hash="$(printf '%s\n' "$rest" | awk '/^xet-file-hash /{print $2}')"
+  [[ -n "$hash" ]] || { echo "git-openxet-protocol: malformed pointer" >&2; exit 1; }
+  "$CLIENT" get "$hash" --out -
+}
+
+cmd_install() {
+  local self; self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/git-openxet-protocol"
+  git config filter.openxet.clean    "$self clean %f"
+  git config filter.openxet.smudge   "$self smudge %f"
+  git config filter.openxet.required true
+  echo "Configured filter.openxet (protocol/chunk-dedup) in $(git rev-parse --show-toplevel)"
+}
+
+case "${1:-}" in
+  clean)   shift; cmd_clean "$@" ;;
+  smudge)  shift; cmd_smudge "$@" ;;
+  install) shift; cmd_install "$@" ;;
+  *) echo "usage: git-openxet-protocol {clean|smudge|install}" >&2; exit 2 ;;
+esac
