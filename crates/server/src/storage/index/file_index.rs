@@ -37,7 +37,7 @@ impl FileIndex for FilesystemFileIndex {
         validate_hash(file_hash)?;
         validate_hash(shard_hash)?;
         let path = self.dir.join(file_hash);
-        super::super::filesystem::atomic_write(&path, shard_hash.as_bytes()).await
+        super::super::fs_util::atomic_write(&path, shard_hash.as_bytes()).await
     }
 
     async fn list_all(&self) -> Result<Vec<(String, String)>, StorageError> {

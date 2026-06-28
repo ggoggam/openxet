@@ -45,7 +45,7 @@ pub struct StorageConfig {
     pub backend: String,
     pub data_dir: PathBuf,
 
-    // S3 / MinIO
+    // S3 / S3-compatible (e.g. RustFS)
     pub s3_bucket: Option<String>,
     pub s3_region: Option<String>,
     pub s3_endpoint: Option<String>,

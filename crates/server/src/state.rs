@@ -6,7 +6,7 @@ use std::time::Instant;
 use tokio::sync::Mutex;
 
 use crate::config::AppConfig;
-use crate::storage::{FilesystemChunkIndex, FilesystemFileIndex, StorageDispatch};
+use crate::storage::{FilesystemChunkIndex, FilesystemFileIndex, ObjectStoreBackend};
 
 /// State for an in-progress multipart upload session.
 pub struct UploadSession {
@@ -19,7 +19,7 @@ pub struct UploadSession {
 
 #[derive(Clone)]
 pub struct AppState {
-    pub storage: Arc<StorageDispatch>,
+    pub storage: Arc<ObjectStoreBackend>,
     pub file_index: Arc<FilesystemFileIndex>,
     pub chunk_index: Arc<FilesystemChunkIndex>,
     pub config: Arc<AppConfig>,

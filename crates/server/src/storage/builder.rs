@@ -1,24 +1,37 @@
 use std::sync::Arc;
 
 use anyhow::{Context, bail};
+use object_store::ObjectStore;
 use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
+use object_store::local::LocalFileSystem;
 
 use crate::config::StorageConfig;
 
-use super::dispatch::StorageDispatch;
-use super::filesystem::FilesystemBackend;
 use super::object_store_backend::ObjectStoreBackend;
 
-/// Build a [`StorageDispatch`] from the given configuration.
-pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<StorageDispatch> {
-    match config.backend.as_str() {
+/// Build an [`ObjectStoreBackend`] from the given configuration.
+///
+/// Every backend — local disk, S3 (and S3-compatible stores such as RustFS),
+/// GCS, and Azure Blob — is routed through the `object_store` crate so the
+/// server talks to a single unified [`object_store::ObjectStore`] interface.
+pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStoreBackend> {
+    let store: Arc<dyn ObjectStore> = match config.backend.as_str() {
         "filesystem" => {
-            let backend = FilesystemBackend::new(&config.data_dir)
+            // `LocalFileSystem` requires its root prefix to exist; also create
+            // the xorb/shard subtrees so listing an empty store never errors.
+            let data_dir = &config.data_dir;
+            tokio::fs::create_dir_all(data_dir.join("xorbs").join("default"))
                 .await
+                .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+            tokio::fs::create_dir_all(data_dir.join("shards"))
+                .await
+                .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+
+            let store = LocalFileSystem::new_with_prefix(data_dir)
                 .context("failed to initialize filesystem storage")?;
-            Ok(StorageDispatch::Filesystem(backend))
+            Arc::new(store)
         }
         "s3" => {
             let bucket = config
@@ -44,10 +57,7 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<StorageDisp
                 builder = builder.with_allow_http(true);
             }
 
-            let store = builder.build().context("failed to build S3 client")?;
-            Ok(StorageDispatch::ObjectStore(ObjectStoreBackend::new(
-                Arc::new(store),
-            )))
+            Arc::new(builder.build().context("failed to build S3 client")?)
         }
         "gcs" => {
             let bucket = config
@@ -61,10 +71,7 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<StorageDisp
                 builder = builder.with_service_account_path(path);
             }
 
-            let store = builder.build().context("failed to build GCS client")?;
-            Ok(StorageDispatch::ObjectStore(ObjectStoreBackend::new(
-                Arc::new(store),
-            )))
+            Arc::new(builder.build().context("failed to build GCS client")?)
         }
         "azure" => {
             let container = config
@@ -81,11 +88,10 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<StorageDisp
                 builder = builder.with_access_key(key);
             }
 
-            let store = builder.build().context("failed to build Azure client")?;
-            Ok(StorageDispatch::ObjectStore(ObjectStoreBackend::new(
-                Arc::new(store),
-            )))
+            Arc::new(builder.build().context("failed to build Azure client")?)
         }
         other => bail!("unknown storage backend: {other}"),
-    }
+    };
+
+    Ok(ObjectStoreBackend::new(store))
 }

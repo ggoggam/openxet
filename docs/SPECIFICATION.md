@@ -384,7 +384,7 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-API/no
 ### Phase 2: Storage & Index (`crates/server/src/storage/`)
 
 7. Implement `StorageBackend` trait + filesystem backend
-  a. Storage backend should support blob stores, most notably S3, MinIO, GCS, and Azure Blob. It should share the same interface.
+  a. Storage backend should support blob stores, most notably S3 (and S3-compatible stores such as RustFS), GCS, and Azure Blob. It should share the same interface.
 8. File index (file_hash → shard_hash)
 9. Chunk index (chunk_hash → xorb locations)
 
@@ -475,7 +475,7 @@ token_ttl_seconds = 3600
 [s3]  # only if backend = "s3"
 bucket = "openxet-data"
 region = "us-east-1"
-endpoint = ""               # custom endpoint for MinIO etc.
+endpoint = ""               # custom endpoint for S3-compatible stores (e.g. RustFS)
 ```
 
 ---

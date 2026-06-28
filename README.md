@@ -48,7 +48,11 @@ cargo run          # Run the server (serves API + static frontend on port 8080)
 ### Running with Docker
 
 ```bash
-docker compose -f docker/compose.yaml up -d --build
+# Local filesystem backend
+docker compose -f docker/compose.local.yaml up -d --build
+
+# S3-compatible backend via RustFS (S3 API on :9000, console on :9001)
+docker compose -f docker/compose.rustfs.yaml up -d --build
 ```
 
 The server will be available at `http://localhost:8080`. Set `OPENXET_AUTH_SECRET` in the compose file for JWT authentication.

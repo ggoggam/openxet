@@ -69,7 +69,7 @@ impl ChunkIndex for FilesystemChunkIndex {
             )
         })?;
 
-        super::super::filesystem::atomic_write(&path, &json).await
+        super::super::fs_util::atomic_write(&path, &json).await
     }
 }
 
