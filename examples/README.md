@@ -19,6 +19,11 @@ pushes a 20 MiB file through the `git-openxet-protocol` clean/smudge filter
 pointer, appends 1 MiB to prove the second push costs only ~1 MiB of CAS
 growth, and fresh-clones to verify the smudge filter restores the bytes.
 
+For a manual, human-followable walkthrough — Gitea login, clone, creating a
+Parquet file (or pulling ImageNet-mini from HuggingFace), commit/push, branch +
+small change, and viewing a file's chunks/xorbs in the web UI — see
+[`gitea-integration/GUIDE.md`](gitea-integration/GUIDE.md).
+
 ## `hf-xet-client/` — the official HuggingFace client against OpenXet
 
 ```bash
