@@ -1,7 +1,8 @@
 # ── Stage 1: Build Rust binary + wasm upload pipeline ────────────────────────
 FROM rust:1.93-slim AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
+# clang/libclang + g++ are required to build librocksdb-sys (bindgen + C++)
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl clang libclang-dev g++ && rm -rf /var/lib/apt/lists/*
 RUN rustup target add wasm32-unknown-unknown && \
     curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 

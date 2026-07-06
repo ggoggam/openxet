@@ -22,7 +22,7 @@ use openxet_server::auth::{Claims, Scope, create_token};
 use openxet_server::config::AppConfig;
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{FilesystemChunkIndex, FilesystemFileIndex, build_storage};
+use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
 
 const TEST_SECRET: &str = "test-secret";
 
@@ -63,8 +63,8 @@ impl TestServer {
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
-        let file_index = Arc::new(FilesystemFileIndex::new(&data_dir).await.unwrap());
-        let chunk_index = Arc::new(FilesystemChunkIndex::new(&data_dir).await.unwrap());
+        let file_index = Arc::new(RocksDbFileIndex::new(&data_dir).unwrap());
+        let chunk_index = Arc::new(RocksDbChunkIndex::new(&data_dir).unwrap());
 
         let state = AppState {
             storage,

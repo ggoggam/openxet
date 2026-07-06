@@ -97,22 +97,28 @@ pub async fn post_shard(
             .await?;
     }
 
-    // Index chunk hashes from CAS info section
-    for cas_block in &shard.cas_info_blocks {
-        let xorb_hash_hex = cas_block.header.cas_hash.to_hex();
-        for (i, entry) in cas_block.entries.iter().enumerate() {
-            state
-                .chunk_index
-                .put(
-                    &entry.chunk_hash.to_hex(),
-                    ChunkLocation {
-                        xorb_hash: xorb_hash_hex.clone(),
-                        chunk_index: i as u32,
-                    },
-                )
-                .await?;
-        }
-    }
+    // Index chunk hashes from CAS info section in one batched write
+    let entries: Vec<(String, ChunkLocation)> = shard
+        .cas_info_blocks
+        .iter()
+        .flat_map(|cas_block| {
+            let xorb_hash_hex = cas_block.header.cas_hash.to_hex();
+            cas_block
+                .entries
+                .iter()
+                .enumerate()
+                .map(move |(i, entry)| {
+                    (
+                        entry.chunk_hash.to_hex(),
+                        ChunkLocation {
+                            xorb_hash: xorb_hash_hex.clone(),
+                            chunk_index: i as u32,
+                        },
+                    )
+                })
+        })
+        .collect();
+    state.chunk_index.put_batch(entries).await?;
 
     Ok(Json(ShardUploadResponse {
         result: if was_inserted { 1 } else { 0 },

@@ -11,4 +11,6 @@ crate-type = ["cdylib", "rlib"]
 openxet-cas-types = { workspace = true }
 openxet-chunking = { workspace = true }
 openxet-hashing = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 wasm-bindgen = "0.2"

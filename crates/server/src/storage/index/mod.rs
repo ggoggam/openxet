@@ -1,12 +1,10 @@
-pub mod chunk_index;
-pub mod file_index;
+pub mod rocksdb_index;
 
 use serde::{Deserialize, Serialize};
 
 use super::error::StorageError;
 
-pub use chunk_index::FilesystemChunkIndex;
-pub use file_index::FilesystemFileIndex;
+pub use rocksdb_index::{RocksDbChunkIndex, RocksDbFileIndex};
 
 /// A location where a chunk can be found: which xorb and at what index within it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -56,5 +54,13 @@ pub trait ChunkIndex: Send + Sync {
         &self,
         chunk_hash: &str,
         location: ChunkLocation,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Record many `chunk_hash → location` entries in one write.
+    /// Same dedup semantics as `put`, but a single commit — use this on the
+    /// upload paths, where a xorb carries ~1000 chunks.
+    fn put_batch(
+        &self,
+        entries: Vec<(String, ChunkLocation)>,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
 }
