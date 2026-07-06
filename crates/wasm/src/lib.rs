@@ -123,8 +123,10 @@ impl UploadSession {
             return Err(JsError::new("refusing to upload an empty file"));
         }
         let chunk_infos = chunk_data(&data);
-        let ranges: Vec<(usize, usize)> =
-            chunk_infos.iter().map(|ci| (ci.offset, ci.length)).collect();
+        let ranges: Vec<(usize, usize)> = chunk_infos
+            .iter()
+            .map(|ci| (ci.offset, ci.length))
+            .collect();
         let chunk_hashes: Vec<MerkleHash> = ranges
             .iter()
             .map(|&(o, l)| compute_chunk_hash(&data[o..o + l]))
@@ -408,8 +410,10 @@ pub fn build_upload_plan(data: &[u8]) -> Result<UploadPlan, String> {
         return Err("refusing to upload an empty file".to_string());
     }
     let chunk_infos = chunk_data(data);
-    let ranges: Vec<(usize, usize)> =
-        chunk_infos.iter().map(|ci| (ci.offset, ci.length)).collect();
+    let ranges: Vec<(usize, usize)> = chunk_infos
+        .iter()
+        .map(|ci| (ci.offset, ci.length))
+        .collect();
     let chunk_hashes: Vec<MerkleHash> = ranges
         .iter()
         .map(|&(o, l)| compute_chunk_hash(&data[o..o + l]))

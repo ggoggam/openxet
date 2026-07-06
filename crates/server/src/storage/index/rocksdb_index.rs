@@ -47,15 +47,13 @@ impl ChunkIndex for RocksDbChunkIndex {
     }
 
     async fn put(&self, chunk_hash: &str, location: ChunkLocation) -> Result<(), StorageError> {
-        self.put_batch(vec![(chunk_hash.to_string(), location)]).await
+        self.put_batch(vec![(chunk_hash.to_string(), location)])
+            .await
     }
 
     /// Insert many `chunk_hash → location` entries in one RocksDB write batch.
     /// One atomic commit instead of one write per chunk.
-    async fn put_batch(
-        &self,
-        entries: Vec<(String, ChunkLocation)>,
-    ) -> Result<(), StorageError> {
+    async fn put_batch(&self, entries: Vec<(String, ChunkLocation)>) -> Result<(), StorageError> {
         let mut batch = rocksdb::WriteBatch::default();
         for (chunk_hash, location) in entries {
             validate_hash(&chunk_hash)?;

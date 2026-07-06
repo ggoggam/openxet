@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use crate::config::AppConfig;
-use crate::storage::{RocksDbChunkIndex, RocksDbFileIndex, ObjectStoreBackend};
+use crate::storage::{ObjectStoreBackend, RocksDbChunkIndex, RocksDbFileIndex};
 
 #[derive(Clone)]
 pub struct AppState {

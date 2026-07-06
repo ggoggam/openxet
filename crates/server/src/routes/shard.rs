@@ -103,19 +103,15 @@ pub async fn post_shard(
         .iter()
         .flat_map(|cas_block| {
             let xorb_hash_hex = cas_block.header.cas_hash.to_hex();
-            cas_block
-                .entries
-                .iter()
-                .enumerate()
-                .map(move |(i, entry)| {
-                    (
-                        entry.chunk_hash.to_hex(),
-                        ChunkLocation {
-                            xorb_hash: xorb_hash_hex.clone(),
-                            chunk_index: i as u32,
-                        },
-                    )
-                })
+            cas_block.entries.iter().enumerate().map(move |(i, entry)| {
+                (
+                    entry.chunk_hash.to_hex(),
+                    ChunkLocation {
+                        xorb_hash: xorb_hash_hex.clone(),
+                        chunk_index: i as u32,
+                    },
+                )
+            })
         })
         .collect();
     state.chunk_index.put_batch(entries).await?;
