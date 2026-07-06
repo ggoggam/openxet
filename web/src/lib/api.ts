@@ -119,31 +119,72 @@ export async function uploadFile(
 ): Promise<UploadResult> {
   const data = new Uint8Array(await file.arrayBuffer());
   const wasm = await loadWasm();
-  const plan = wasm.plan_upload(data);
+
+  // Global dedup pass: probe chunk hashes against the server and resolve
+  // already-stored chunks to their existing xorbs, so only new data uploads.
+  const session = new wasm.UploadSession(data);
+  let plan;
+  try {
+    // Probes within a batch are independent, so fire them concurrently;
+    // each settled batch may create new candidates (continuations of hits).
+    const PROBE_BATCH = 16;
+    for (;;) {
+      const batch: string[] = session.next_query_batch(PROBE_BATCH);
+      if (batch.length === 0) break;
+      const token = await mintToken("read");
+      await Promise.all(
+        batch.map(async (probe) => {
+          const res = await fetch(`/v1/chunks/default-merkledb/${probe}`, {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (res.ok) {
+            // JS is single-threaded: applies run one at a time as responses
+            // arrive, so mutating the session here is safe.
+            session.apply_dedup_shard(new Uint8Array(await res.arrayBuffer()));
+          } else if (res.status !== 404) {
+            throw new Error(`dedup query failed: HTTP ${res.status}`);
+          }
+          // 404 = chunk unknown to the server; it will be packed and uploaded.
+        }),
+      );
+    }
+    plan = session.finish();
+  } finally {
+    session.free();
+  }
 
   try {
     const xorbCount = plan.xorb_count;
     const xorbHashes: string[] = [];
-    const xorbSizes: number[] = [];
     let total = 0;
     for (let i = 0; i < xorbCount; i++) {
       xorbHashes.push(plan.xorb_hash(i));
-      const size = plan.xorb_data(i).length;
-      xorbSizes.push(size);
-      total += size;
+      total += plan.xorb_size(i); // cheap length read — does not clone the xorb
     }
 
+    // Upload xorbs concurrently with a bounded pool (mirrors xet-core's
+    // parallel_xorb_uploader). Serial POSTs stall on a full round trip per
+    // xorb; a small pool overlaps them without flooding the server.
     let uploaded = 0;
     onProgress?.(0, total);
-    for (let i = 0; i < xorbCount; i++) {
-      await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, "write", {
-        method: "POST",
-        headers: { "Content-Type": "application/octet-stream" },
-        body: new Blob([new Uint8Array(plan.xorb_data(i))]),
-      });
-      uploaded += xorbSizes[i];
-      onProgress?.(uploaded, total);
-    }
+    const CONCURRENCY = 4;
+    let next = 0;
+    const worker = async () => {
+      while (next < xorbCount) {
+        const i = next++;
+        const size = plan.xorb_size(i);
+        await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, "write", {
+          method: "POST",
+          headers: { "Content-Type": "application/octet-stream" },
+          body: new Blob([new Uint8Array(plan.xorb_data(i))]), // clone once, here
+        });
+        uploaded += size;
+        onProgress?.(uploaded, total);
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(CONCURRENCY, xorbCount) }, worker),
+    );
 
     await authFetch("/v1/shards", "write", {
       method: "POST",

@@ -72,6 +72,7 @@ impl From<StorageError> for AppError {
             StorageError::ObjectStore(msg) => {
                 AppError::Internal(anyhow::anyhow!("object store error: {msg}"))
             }
+            StorageError::Index(msg) => AppError::Internal(anyhow::anyhow!("index error: {msg}")),
         }
     }
 }

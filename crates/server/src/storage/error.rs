@@ -17,6 +17,9 @@ pub enum StorageError {
 
     #[error("object store error: {0}")]
     ObjectStore(String),
+
+    #[error("index error: {0}")]
+    Index(String),
 }
 
 impl StorageError {

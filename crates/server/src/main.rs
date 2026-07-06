@@ -8,7 +8,7 @@ use tracing_subscriber::EnvFilter;
 use openxet_server::config::{AppConfig, Cli};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{FilesystemChunkIndex, FilesystemFileIndex, build_storage};
+use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,8 +36,8 @@ async fn main() -> Result<()> {
     // Initialize storage
     let data_dir = config.data_dir();
     let storage = Arc::new(build_storage(&config.storage).await?);
-    let file_index = Arc::new(FilesystemFileIndex::new(data_dir).await?);
-    let chunk_index = Arc::new(FilesystemChunkIndex::new(data_dir).await?);
+    let file_index = Arc::new(RocksDbFileIndex::new(data_dir)?);
+    let chunk_index = Arc::new(RocksDbChunkIndex::new(data_dir)?);
 
     let state = AppState {
         storage,

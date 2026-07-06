@@ -58,19 +58,21 @@ pub async fn post_xorb(
     // Store the xorb
     state.storage.put_xorb(&hash, body).await?;
 
-    // Index each chunk
-    for (i, (chunk_hash, _)) in chunk_hashes_and_sizes.iter().enumerate() {
-        state
-            .chunk_index
-            .put(
-                &chunk_hash.to_hex(),
+    // Index all chunks in one batched write.
+    let entries: Vec<(String, ChunkLocation)> = chunk_hashes_and_sizes
+        .iter()
+        .enumerate()
+        .map(|(i, (chunk_hash, _))| {
+            (
+                chunk_hash.to_hex(),
                 ChunkLocation {
                     xorb_hash: hash.clone(),
                     chunk_index: i as u32,
                 },
             )
-            .await?;
-    }
+        })
+        .collect();
+    state.chunk_index.put_batch(entries).await?;
 
     Ok(Json(XorbUploadResponse { was_inserted: true }))
 }
