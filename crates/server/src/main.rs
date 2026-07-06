@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
+use openxet_server::auth::JwksCache;
 use openxet_server::config::{AppConfig, Cli, DEFAULT_AUTH_SECRET};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
@@ -47,11 +49,24 @@ async fn main() -> Result<()> {
     let file_index = Arc::new(RocksDbFileIndex::new(data_dir)?);
     let chunk_index = Arc::new(RocksDbChunkIndex::new(data_dir)?);
 
+    let jwks = Arc::new(JwksCache::new(
+        config.auth.oidc_issuers.clone(),
+        Duration::from_secs(config.auth.jwks_ttl_seconds),
+    ));
+    if jwks.is_enabled() {
+        tracing::info!(
+            issuers = ?config.auth.oidc_issuers,
+            jwks_ttl_seconds = config.auth.jwks_ttl_seconds,
+            "OIDC JWKS verification enabled"
+        );
+    }
+
     let state = AppState {
         storage,
         file_index,
         chunk_index,
         config: Arc::new(config.clone()),
+        jwks,
     };
 
     let app = build_router(state);

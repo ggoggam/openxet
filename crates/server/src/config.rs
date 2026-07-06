@@ -79,6 +79,19 @@ pub struct StorageConfig {
 pub struct AuthConfig {
     pub secret: String,
     pub shard_key_ttl_seconds: u64,
+
+    /// Allowed OIDC issuers (e.g. Keycloak realm URLs like
+    /// `https://kc.example.com/realms/myrealm`). When non-empty, tokens signed
+    /// with an asymmetric algorithm are verified against the issuer's JWKS.
+    /// Empty disables the JWKS path entirely (HS256 shared-secret only).
+    pub oidc_issuers: Vec<String>,
+
+    /// Expected audience for OIDC tokens. When `None`, the `aud` claim is not
+    /// checked (signature + issuer + expiry are still enforced).
+    pub oidc_audience: Option<String>,
+
+    /// How long a fetched JWKS is trusted before it is refetched, in seconds.
+    pub jwks_ttl_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -117,6 +130,9 @@ impl Default for AuthConfig {
         Self {
             secret: DEFAULT_AUTH_SECRET.to_string(),
             shard_key_ttl_seconds: 3600,
+            oidc_issuers: Vec::new(),
+            oidc_audience: None,
+            jwks_ttl_seconds: 900,
         }
     }
 }
@@ -211,6 +227,22 @@ impl AppConfig {
             && let Ok(ttl) = ttl.parse::<u64>()
         {
             self.auth.shard_key_ttl_seconds = ttl;
+        }
+        if let Ok(issuers) = std::env::var("OPENXET_OIDC_ISSUERS") {
+            self.auth.oidc_issuers = issuers
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+        }
+        if let Ok(aud) = std::env::var("OPENXET_OIDC_AUDIENCE") {
+            self.auth.oidc_audience = Some(aud);
+        }
+        if let Ok(ttl) = std::env::var("OPENXET_JWKS_TTL")
+            && let Ok(ttl) = ttl.parse::<u64>()
+        {
+            self.auth.jwks_ttl_seconds = ttl;
         }
     }
 

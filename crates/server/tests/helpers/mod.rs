@@ -60,6 +60,7 @@ impl TestServer {
             auth: openxet_server::config::AuthConfig {
                 secret: TEST_SECRET.to_string(),
                 shard_key_ttl_seconds: 3600,
+                ..Default::default()
             },
         };
 
@@ -67,11 +68,17 @@ impl TestServer {
         let file_index = Arc::new(RocksDbFileIndex::new(&data_dir).unwrap());
         let chunk_index = Arc::new(RocksDbChunkIndex::new(&data_dir).unwrap());
 
+        let jwks = Arc::new(openxet_server::auth::JwksCache::new(
+            config.auth.oidc_issuers.clone(),
+            std::time::Duration::from_secs(config.auth.jwks_ttl_seconds),
+        ));
+
         let state = AppState {
             storage,
             file_index,
             chunk_index,
             config: Arc::new(config),
+            jwks,
         };
 
         let app = build_router(state);
