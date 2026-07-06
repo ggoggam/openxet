@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::Deserialize;
 
+/// Default auth secret. Tokens signed with this are trivially forgeable, so the
+/// server warns loudly at startup if it is still in use.
+pub const DEFAULT_AUTH_SECRET: &str = "change-me-in-production";
+
 #[derive(Parser, Debug)]
 #[command(name = "openxet-server", about = "OpenXet CAS server")]
 pub struct Cli {
@@ -37,6 +41,13 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub frontend_dir: PathBuf,
+
+    /// Public base URL (e.g. `https://cas.example.com`) advertised in
+    /// reconstruction fetch URLs. When set, it is used instead of the
+    /// client-supplied `Host` header, which is otherwise attacker-controlled
+    /// and would let a request steer fetch URLs (with an embedded token) at an
+    /// arbitrary host. Leave unset only for local/dev use.
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,6 +87,7 @@ impl Default for ServerConfig {
             host: "0.0.0.0".to_string(),
             port: 8080,
             frontend_dir: PathBuf::from("./web/dist"),
+            public_url: None,
         }
     }
 }
@@ -103,7 +115,7 @@ impl Default for StorageConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            secret: "change-me-in-production".to_string(),
+            secret: DEFAULT_AUTH_SECRET.to_string(),
             shard_key_ttl_seconds: 3600,
         }
     }
@@ -152,6 +164,9 @@ impl AppConfig {
         }
         if let Ok(frontend_dir) = std::env::var("OPENXET_FRONTEND_DIR") {
             self.server.frontend_dir = PathBuf::from(frontend_dir);
+        }
+        if let Ok(public_url) = std::env::var("OPENXET_PUBLIC_URL") {
+            self.server.public_url = Some(public_url);
         }
         if let Ok(backend) = std::env::var("OPENXET_STORAGE_BACKEND") {
             self.storage.backend = backend;

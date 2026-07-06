@@ -158,12 +158,22 @@ pub async fn get_reconstruction(
     }
 
     // Build fetch_info: for each unique xorb, compute byte offsets.
-    // Derive the base URL from the request's Host header so that URLs
-    // are reachable by the client (the configured host/port may be 0.0.0.0:0).
-    let base_url = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .map(|host| format!("http://{host}"))
+    // Prefer the configured public URL; the `Host` header is attacker-controlled
+    // and, since fetch URLs embed a read token, trusting it would let a request
+    // steer that token at an arbitrary host. Fall back to `Host` only when no
+    // public URL is configured (local/dev, where the bound port may differ from
+    // config, e.g. an OS-assigned port).
+    let base_url = state
+        .config
+        .server
+        .public_url
+        .clone()
+        .or_else(|| {
+            headers
+                .get(axum::http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(|host| format!("http://{host}"))
+        })
         .unwrap_or_else(|| state.config.base_url());
 
     // fetch_info URLs must be fetchable with no Authorization header (xet-core

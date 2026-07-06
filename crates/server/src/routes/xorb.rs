@@ -41,6 +41,12 @@ pub async fn post_xorb(
     // Parse and validate xorb
     let chunks = deserialize_xorb(&body)?;
 
+    // A xorb must contain at least one chunk; an empty chunk list would panic
+    // the merkle-root computation below.
+    if chunks.is_empty() {
+        return Err(AppError::BadRequest("xorb contains no chunks".to_string()));
+    }
+
     // Compute chunk hashes and verify xorb hash
     let chunk_hashes_and_sizes: Vec<(MerkleHash, usize)> = chunks
         .iter()

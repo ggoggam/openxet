@@ -7,6 +7,12 @@ use crate::chunk::{ChunkError, ChunkHeader, CompressionType, compress_chunk, dec
 /// Maximum serialized xorb size: 64 MiB.
 pub const MAX_XORB_SIZE: usize = 64 * 1024 * 1024;
 
+/// Cap on chunk slots pre-allocated when deserializing an untrusted range.
+/// A bogus `(start, end)` — inverted or absurdly large — must not drive a
+/// giant up-front allocation; the vec still grows to fit real chunks, which
+/// are bounded by `MAX_XORB_SIZE` anyway.
+const MAX_CHUNKS_PREALLOC: usize = 64 * 1024;
+
 /// Soft limit for incremental xorb building. Once the accumulated buffer
 /// exceeds this threshold, a new xorb should be started.  The 4 MiB
 /// headroom accommodates the last chunk added (max 128 KiB uncompressed)
@@ -81,7 +87,9 @@ pub fn deserialize_xorb_range(
     end: usize,
 ) -> Result<Vec<XorbChunk>, XorbError> {
     let mut reader = io::Cursor::new(data);
-    let mut chunks = Vec::with_capacity(end - start);
+    // `end - start` is untrusted: guard against underflow (end < start) and
+    // huge values before allocating.
+    let mut chunks = Vec::with_capacity(end.saturating_sub(start).min(MAX_CHUNKS_PREALLOC));
     let mut index = 0;
 
     while (reader.position() as usize) < data.len() && index < end {
@@ -254,6 +262,18 @@ mod tests {
         assert_eq!(range_chunks.len(), 4);
         assert_eq!(range_chunks[0].data, vec![3u8; 1000]);
         assert_eq!(range_chunks[3].data, vec![6u8; 1000]);
+    }
+
+    #[test]
+    fn test_xorb_range_inverted_does_not_panic() {
+        // An inverted (end < start) range from an untrusted shard must not
+        // underflow the capacity computation; it just yields no chunks.
+        let chunks: Vec<Vec<u8>> = (0..4).map(|i| vec![i as u8; 100]).collect();
+        let chunk_refs: Vec<&[u8]> = chunks.iter().map(|c| c.as_slice()).collect();
+        let serialized = serialize_xorb(&chunk_refs, CompressionType::None).unwrap();
+
+        let result = deserialize_xorb_range(&serialized, 3, 1).unwrap();
+        assert!(result.is_empty());
     }
 
     #[test]

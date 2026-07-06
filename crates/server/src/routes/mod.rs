@@ -16,6 +16,23 @@ use crate::state::AppState;
 
 const MAX_BODY_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
 
+/// Replace any `token=…` value in a query string with a placeholder so
+/// short-lived fetch tokens (passed as `?token=` on presigned-style URLs) never
+/// land in request logs.
+fn redact_query(query: &str) -> String {
+    query
+        .split('&')
+        .map(|kv| {
+            if kv.starts_with("token=") {
+                "token=REDACTED"
+            } else {
+                kv
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 pub fn build_router(state: AppState) -> Router {
     let cas_routes = Router::new()
         .route(
@@ -53,7 +70,7 @@ pub fn build_router(state: AppState) -> Router {
             tracing::info!(
                 method = %request.method(),
                 path = %request.uri().path(),
-                query = request.uri().query().unwrap_or(""),
+                query = %redact_query(request.uri().query().unwrap_or("")),
                 content_length = %content_length,
                 user_agent = request.headers().get(http::header::USER_AGENT)
                     .and_then(|v: &HeaderValue| v.to_str().ok())

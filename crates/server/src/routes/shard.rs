@@ -5,7 +5,9 @@ use serde::Serialize;
 
 use openxet_cas_types::shard::{MAX_SHARD_SIZE, Shard};
 use openxet_cas_types::xorb::deserialize_xorb_range;
-use openxet_hashing::{MerkleHash, compute_chunk_hash, compute_verification_hash};
+use openxet_hashing::{
+    MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
+};
 
 use crate::auth::RequireWrite;
 use crate::error::AppError;
@@ -37,8 +39,22 @@ pub async fn post_shard(
         ));
     }
 
-    // Validate all referenced xorbs exist and verify verification hashes
+    // Validate every file block: referenced xorbs must exist, verification
+    // hashes (when present) must match, and — critically — the declared
+    // file_hash must equal the hash recomputed from the actual chunk content.
+    // Without that last check a writer could register arbitrary bytes under any
+    // file hash and poison later reconstructions (the core CAS invariant).
     for file_block in &shard.file_info_blocks {
+        if file_block.entries.is_empty() {
+            return Err(AppError::BadRequest(
+                "file info block has no entries".to_string(),
+            ));
+        }
+
+        // (chunk_hash, size) for the whole file, in term order, to rebuild the
+        // file hash.
+        let mut file_chunks: Vec<(MerkleHash, usize)> = Vec::new();
+
         for (i, entry) in file_block.entries.iter().enumerate() {
             let xorb_hash_hex = entry.cas_hash.to_hex();
             validate_hash(&xorb_hash_hex)?;
@@ -49,22 +65,36 @@ pub async fn post_shard(
                 )));
             }
 
-            // Validate verification entry if present
+            let chunk_start = entry.chunk_index_start as usize;
+            let chunk_end = entry.chunk_index_end as usize;
+            if chunk_end <= chunk_start {
+                return Err(AppError::BadRequest(format!(
+                    "file {} term {i} has empty or inverted chunk range [{chunk_start},{chunk_end})",
+                    file_block.header.file_hash.to_hex()
+                )));
+            }
+
+            let xorb_data = state.storage.get_xorb(&xorb_hash_hex).await?;
+            let chunks =
+                deserialize_xorb_range(&xorb_data, chunk_start, chunk_end).map_err(|e| {
+                    AppError::BadRequest(format!(
+                        "failed to read xorb {xorb_hash_hex} chunks [{chunk_start},{chunk_end}): {e}"
+                    ))
+                })?;
+
+            // The term must resolve to exactly the chunks it claims.
+            if chunks.len() != chunk_end - chunk_start {
+                return Err(AppError::BadRequest(format!(
+                    "xorb {xorb_hash_hex} term [{chunk_start},{chunk_end}) resolved {} chunks",
+                    chunks.len()
+                )));
+            }
+
+            let chunk_hashes: Vec<MerkleHash> =
+                chunks.iter().map(|c| compute_chunk_hash(&c.data)).collect();
+
+            // Validate the per-term verification hash if the shard carries one.
             if i < file_block.verification_entries.len() {
-                let xorb_data = state.storage.get_xorb(&xorb_hash_hex).await?;
-                let chunk_start = entry.chunk_index_start as usize;
-                let chunk_end = entry.chunk_index_end as usize;
-
-                let chunks =
-                    deserialize_xorb_range(&xorb_data, chunk_start, chunk_end).map_err(|e| {
-                        AppError::BadRequest(format!(
-                            "failed to read xorb {xorb_hash_hex} chunks [{chunk_start},{chunk_end}): {e}"
-                        ))
-                    })?;
-
-                let chunk_hashes: Vec<MerkleHash> =
-                    chunks.iter().map(|c| compute_chunk_hash(&c.data)).collect();
-
                 let computed = compute_verification_hash(&chunk_hashes);
                 let expected = &file_block.verification_entries[i].range_hash;
 
@@ -77,6 +107,19 @@ pub async fn post_shard(
                     )));
                 }
             }
+
+            for (h, c) in chunk_hashes.iter().zip(chunks.iter()) {
+                file_chunks.push((*h, c.data.len()));
+            }
+        }
+
+        let computed_file_hash = compute_file_hash(&file_chunks);
+        if computed_file_hash != file_block.header.file_hash {
+            return Err(AppError::BadRequest(format!(
+                "file hash mismatch: declared={}, computed={}",
+                file_block.header.file_hash.to_hex(),
+                computed_file_hash.to_hex()
+            )));
         }
     }
 
