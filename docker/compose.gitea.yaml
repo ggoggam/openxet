@@ -31,5 +31,24 @@ services:
       retries: 5
       start_period: 10s
 
+  # Create the admin user once gitea is up (mirrors demo.sh).
+  gitea-init:
+    image: gitea/gitea:1.24
+    depends_on:
+      gitea:
+        condition: service_healthy
+    volumes:
+      - gitea-data:/data
+    user: git
+    entrypoint:
+      - sh
+      - -c
+      - |
+        gitea admin user create \
+          --username xet --password xetpass123 \
+          --email xet@example.com --admin --must-change-password=false \
+          || echo "user already exists"
+    restart: "no"
+
 volumes:
   gitea-data:
