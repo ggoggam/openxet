@@ -33,4 +33,4 @@ repos:
         entry: mise run fe:lint
         language: system
         pass_filenames: false
-        files: ^frontend/
+        files: ^web/
