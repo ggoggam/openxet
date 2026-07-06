@@ -31,6 +31,10 @@ type TableFormat = "csv" | "tsv" | "parquet";
 
 const ROWS_PER_PAGE = 50;
 
+// ponytail: unique name per registration — reusing a name serves stale
+// buffer-manager pages from the previous file (snappy size-mismatch errors).
+let fileSeq = 0;
+
 interface QueryResult {
   columns: string[];
   rows: (string | null)[][];
@@ -61,18 +65,20 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
 
   useEffect(() => {
     let cancelled = false;
+    let registeredFile: string | null = null;
 
-    (async () => {
+    const setup = (async () => {
       try {
         const db = await getDuckDB();
         const conn = await db.connect();
         connRef.current = conn;
 
         let viewSql: string;
+        const filename = `data-${++fileSeq}.${format}`;
+        registeredFile = filename;
 
         if (format === "parquet" && contentUrl && !bytes) {
           // Stream parquet via HTTP Range requests — no full download needed.
-          const filename = "data.parquet";
           await db.registerFileURL(
             filename,
             contentUrl,
@@ -81,8 +87,6 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
           );
           viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('${filename}')`;
         } else if (bytes) {
-          const filename =
-            format === "parquet" ? "data.parquet" : `data.${format}`;
           await db.registerFileBuffer(filename, bytes);
 
           if (format === "parquet") {
@@ -114,6 +118,12 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
       connRef.current?.close();
       connRef.current = null;
       readyRef.current = false;
+      // Best-effort: free the registered file once setup has settled.
+      setup.finally(async () => {
+        if (!registeredFile) return;
+        const db = await getDuckDB();
+        await db.dropFile(registeredFile).catch(() => {});
+      });
     };
   }, [bytes, format, contentUrl]);
 
