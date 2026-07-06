@@ -50,6 +50,7 @@ impl TestServer {
                 host: "127.0.0.1".to_string(),
                 port: 0, // OS-assigned
                 frontend_dir,
+                public_url: None,
             },
             storage: openxet_server::config::StorageConfig {
                 backend: "filesystem".to_string(),

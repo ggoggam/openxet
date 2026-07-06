@@ -32,6 +32,12 @@ pub const FOOTER_SIZE: usize = 200;
 /// Maximum shard size: 64 MiB.
 pub const MAX_SHARD_SIZE: usize = 64 * 1024 * 1024;
 
+/// Cap on entry slots pre-allocated from an untrusted `num_entries` field.
+/// The vec still grows to hold real entries (bounded by `MAX_SHARD_SIZE`);
+/// a bogus count just can't force a giant allocation before `read_exact`
+/// fails at EOF.
+const MAX_ENTRIES_PREALLOC: usize = 64 * 1024;
+
 /// Bookend marker: 32 bytes of 0xFF followed by 16 bytes of 0x00.
 const BOOKEND_HASH: [u8; 32] = [0xFF; 32];
 
@@ -235,7 +241,8 @@ impl FileInfoBlock {
             None => return Ok(None), // bookend
         };
 
-        let mut entries = Vec::with_capacity(header.num_entries as usize);
+        let mut entries =
+            Vec::with_capacity((header.num_entries as usize).min(MAX_ENTRIES_PREALLOC));
         for _ in 0..header.num_entries {
             entries.push(FileDataSequenceEntry::read_from(reader)?);
         }
@@ -364,7 +371,8 @@ impl CASInfoBlock {
             None => return Ok(None), // bookend
         };
 
-        let mut entries = Vec::with_capacity(header.num_entries as usize);
+        let mut entries =
+            Vec::with_capacity((header.num_entries as usize).min(MAX_ENTRIES_PREALLOC));
         for _ in 0..header.num_entries {
             entries.push(CASChunkSequenceEntry::read_from(reader)?);
         }

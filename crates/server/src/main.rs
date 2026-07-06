@@ -5,7 +5,7 @@ use clap::Parser;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
-use openxet_server::config::{AppConfig, Cli};
+use openxet_server::config::{AppConfig, Cli, DEFAULT_AUTH_SECRET};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
 use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
@@ -25,6 +25,14 @@ async fn main() -> Result<()> {
     // Parse CLI and load config
     let cli = Cli::parse();
     let config = AppConfig::load(&cli)?;
+
+    if config.auth.secret.is_empty() || config.auth.secret == DEFAULT_AUTH_SECRET {
+        tracing::warn!(
+            "OPENXET_AUTH_SECRET is unset or the built-in default — all JWTs are \
+             forgeable and anyone can read or write. Set a strong secret before \
+             exposing this server."
+        );
+    }
 
     tracing::info!(
         host = %config.server.host,

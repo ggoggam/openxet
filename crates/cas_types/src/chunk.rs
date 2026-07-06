@@ -78,14 +78,22 @@ impl ChunkHeader {
     }
 }
 
-/// Decompress LZ4 framed data.
-fn lz4_frame_decompress(compressed: &[u8]) -> Result<Vec<u8>, ChunkError> {
+/// Decompress LZ4 framed data, bounding the output to `limit` bytes.
+///
+/// A malicious frame can expand far beyond its declared size, so we cap the
+/// reader at `limit + 1` and reject anything larger instead of materializing
+/// an unbounded buffer (decompression-bomb guard).
+fn lz4_frame_decompress(compressed: &[u8], limit: usize) -> Result<Vec<u8>, ChunkError> {
     use std::io::{Cursor, Read as _};
-    let mut decoder = lz4_flex::frame::FrameDecoder::new(Cursor::new(compressed));
+    let decoder = lz4_flex::frame::FrameDecoder::new(Cursor::new(compressed));
     let mut decompressed = Vec::new();
     decoder
+        .take(limit as u64 + 1)
         .read_to_end(&mut decompressed)
         .map_err(ChunkError::Io)?;
+    if decompressed.len() > limit {
+        return Err(ChunkError::DecompressedTooLarge);
+    }
     Ok(decompressed)
 }
 
@@ -101,13 +109,13 @@ fn lz4_frame_compress(data: &[u8]) -> Vec<u8> {
 pub fn decompress_chunk(
     compressed: &[u8],
     compression: CompressionType,
-    _uncompressed_size: usize,
+    uncompressed_size: usize,
 ) -> Result<Vec<u8>, ChunkError> {
     match compression {
         CompressionType::None => Ok(compressed.to_vec()),
-        CompressionType::Lz4 => lz4_frame_decompress(compressed),
+        CompressionType::Lz4 => lz4_frame_decompress(compressed, uncompressed_size),
         CompressionType::ByteGrouping4Lz4 => {
-            let lz4_decompressed = lz4_frame_decompress(compressed)?;
+            let lz4_decompressed = lz4_frame_decompress(compressed, uncompressed_size)?;
             Ok(byte_ungroup4(&lz4_decompressed))
         }
     }
@@ -216,6 +224,8 @@ pub enum ChunkError {
     Io(#[from] std::io::Error),
     #[error("unexpected end of data")]
     UnexpectedEof,
+    #[error("decompressed size exceeds expected bound")]
+    DecompressedTooLarge,
 }
 
 #[cfg(test)]
