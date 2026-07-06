@@ -1,17 +1,18 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
 
 use openxet_cas_types::chunk::CompressionType;
+use openxet_cas_types::reconstruction::QueryReconstructionResponse;
 use openxet_cas_types::shard::{
     CASChunkSequenceEntry, CASChunkSequenceHeader, CASInfoBlock, FileDataSequenceEntry,
     FileDataSequenceHeader, FileInfoBlock, FileVerificationEntry, MDB_FILE_FLAG_WITH_VERIFICATION,
     Shard, ShardHeader,
 };
-use openxet_cas_types::xorb::{XORB_SOFT_LIMIT, compute_xorb_hash, serialize_single_chunk};
+use openxet_cas_types::xorb::{
+    XORB_SOFT_LIMIT, compute_xorb_hash, deserialize_xorb, serialize_single_chunk,
+};
 use openxet_chunking::chunk_data;
 use openxet_hashing::{
     MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
@@ -44,10 +45,6 @@ impl TestServer {
             .await
             .unwrap();
 
-        // Create uploads temp directory
-        let uploads_dir = data_dir.join("uploads").join("tmp");
-        tokio::fs::create_dir_all(&uploads_dir).await.unwrap();
-
         let config = AppConfig {
             server: openxet_server::config::ServerConfig {
                 host: "127.0.0.1".to_string(),
@@ -68,14 +65,12 @@ impl TestServer {
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
         let file_index = Arc::new(FilesystemFileIndex::new(&data_dir).await.unwrap());
         let chunk_index = Arc::new(FilesystemChunkIndex::new(&data_dir).await.unwrap());
-        let upload_sessions = Arc::new(Mutex::new(HashMap::new()));
 
         let state = AppState {
             storage,
             file_index,
             chunk_index,
             config: Arc::new(config),
-            upload_sessions,
         };
 
         let app = build_router(state);
@@ -325,4 +320,53 @@ pub async fn upload_artifacts(server: &TestServer, artifacts: &UploadArtifacts) 
         .await
         .unwrap();
     assert_eq!(resp.status(), 200, "shard upload failed");
+}
+
+/// Download a file via the CAS protocol: query the reconstruction, fetch each
+/// term's byte range from its fetch_info URL, decompress, and concatenate.
+#[allow(dead_code)]
+pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<u8> {
+    let token = server.read_token();
+
+    let resp = server
+        .client
+        .get(format!(
+            "{}/v1/reconstructions/{file_hash}",
+            server.base_url
+        ))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200, "reconstruction query failed");
+    let recon: QueryReconstructionResponse = resp.json().await.unwrap();
+
+    let mut file_bytes = Vec::new();
+    for term in &recon.terms {
+        let fetch = recon
+            .fetch_info
+            .get(&term.hash)
+            .and_then(|v| v.iter().find(|f| f.range.contains_range(&term.range)))
+            .unwrap_or_else(|| panic!("no fetch_info for xorb {}", term.hash));
+
+        let resp = server
+            .client
+            .get(&fetch.url)
+            .bearer_auth(&token)
+            .header(
+                "range",
+                format!("bytes={}-{}", fetch.url_range.start, fetch.url_range.end),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success(), "xorb range fetch failed");
+        let part = resp.bytes().await.unwrap();
+
+        for chunk in deserialize_xorb(&part).unwrap() {
+            file_bytes.extend_from_slice(&chunk.data);
+        }
+    }
+
+    file_bytes[recon.offset_into_first_range as usize..].to_vec()
 }

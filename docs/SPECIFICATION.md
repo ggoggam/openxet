@@ -346,27 +346,23 @@ Simple web UI for browsing and managing files stored in the CAS server. Served a
 
 ### Pages
 
-1. **Dashboard** (`/`): Overview of stored files count, total storage, recent uploads
-2. **Files** (`/files`): List all stored files with hash, size, upload date. Search/filter support
-3. **File Detail** (`/files/:hash`): Show reconstruction terms, referenced xorbs, file metadata (SHA256, size)
-4. **Xorbs** (`/xorbs`): Browse stored xorbs with chunk counts and sizes
-5. **Upload** (`/upload`): Drag-and-drop file upload that performs client-side chunking → xorb creation → shard upload (demonstrates the full upload protocol)
+1. **Files** (`/`): Local catalog of files uploaded from this browser (name, hash, size, date) with filter, plus "open by hash" for any file in the CAS
+2. **File Detail** (`/files/:hash`): Reconstruction terms, referenced xorbs, content preview (text/image/PDF/hex, CSV/Parquet via DuckDB WASM), download
+3. **Upload** (`/upload`): Drag-and-drop upload performing client-side chunking → xorb creation → shard upload via `openxet-wasm` (the full Xet upload protocol)
 
 ### Frontend API
 
-The server exposes additional management endpoints (prefixed `/api/`) for the frontend:
-
-```
-GET  /api/files                    # List all files
-GET  /api/files/:hash              # File detail with reconstruction
-GET  /api/xorbs                    # List all xorbs
-GET  /api/stats                    # Storage statistics
-POST /api/upload                   # Simple file upload (server performs chunking)
-```
+The server exposes no endpoints beyond the Xet protocol (`/v1/*`); the
+frontend drives it directly. Uploads are chunked/hashed/packed client-side by
+`openxet-wasm` (`crates/wasm` compiled to WebAssembly) and POSTed as
+xorbs + a shard; downloads use `/v1/content` (and `/v1/reconstructions` for
+metadata). File listing has no protocol equivalent — the UI keeps a local
+catalog in browser localStorage. Auth tokens are minted in the browser
+(WebCrypto HS256) from the server secret.
 
 ### Static File Serving
 
-The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-API/non-v1 routes serve `index.html`).
+The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 routes serve `index.html`).
 
 ---
 

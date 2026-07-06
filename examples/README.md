@@ -19,34 +19,49 @@ pushes a 20 MiB file through the `git-openxet-protocol` clean/smudge filter
 pointer, appends 1 MiB to prove the second push costs only ~1 MiB of CAS
 growth, and fresh-clones to verify the smudge filter restores the bytes.
 
+## `hf-xet-client/` — the official HuggingFace client against OpenXet
+
+```bash
+examples/hf-xet-client/demo.sh
+```
+
+Proof of wire compatibility: the stock [`hf_xet`](https://pypi.org/project/hf-xet/)
+Python package (the exact client `huggingface_hub` uses) uploads and downloads
+against OpenXet unmodified, via its `endpoint` parameter. The only piece the
+official client leaves to the server operator is token *issuance* — on
+huggingface.co that's the Hub's `xet-{read,write}-token` endpoint — so the demo
+mints an OpenXet JWT locally with PyJWT and hands it to `hf_xet.XetSession`.
+
 ## `git-integration/` — OpenXet as a git large-file backend
 
 ```bash
-examples/git-integration/demo.sh
+examples/git-integration/demo-chunk-dedup.sh
 ```
 
 This is the demonstration that most closely matches how real tooling uses a
-content store. It wires a **git clean/smudge filter** (`git-integration/git-openxet`)
-to an OpenXet server, exactly the mechanism Git LFS — and HuggingFace's Xet —
-use to keep large bytes out of git:
+content store. It wires a **git clean/smudge filter**
+(`git-integration/git-openxet-protocol`) to an OpenXet server, exactly the
+mechanism Git LFS — and HuggingFace's Xet — use to keep large bytes out of git:
 
 - `.gitattributes` declares `*.bin filter=openxet -text`.
-- **clean** (on `git add`): the real file bytes are uploaded to OpenXet and git
-  stores only a tiny **pointer file**:
+- **clean** (on `git add`): the real file bytes are uploaded to OpenXet over the
+  `/v1` Xet wire protocol (`openxet-client put`) and git stores only a tiny
+  **pointer file**:
   ```
   version https://openxet/spec/v1
   xet-file-hash <64-hex>
   size <bytes>
   ```
 - **smudge** (on `git checkout`): the pointer is read back, the bytes are fetched
-  from OpenXet (`GET /api/files/{hash}/content`), and the working tree gets the
-  real file.
+  from OpenXet via CAS reconstruction (`openxet-client get`), and the working
+  tree gets the real file.
 
-The demo commits a 130 MiB file, shows git stored a 118-byte pointer (not the
-data), appends to it and commits again, and confirms the second commit grew the
-CAS by far less than the full file (dedup). Finally it clones the repo into a
-fresh tree and shows the smudge filter materializing the bytes byte-for-byte,
-and recovers the older revision straight from git history.
+The demo commits a 20 MiB file (a *single* xorb), shows git stored a 118-byte
+pointer (not the data), appends 1 MiB and commits again, and confirms the second
+commit grew the CAS by only ~1 MiB — chunk-level dedup, the bytes that actually
+changed. Finally it clones the repo into a fresh tree and shows the smudge
+filter materializing the bytes byte-for-byte, and recovers the older revision
+straight from git history.
 
 ### How this maps to HuggingFace
 
@@ -62,28 +77,8 @@ web UI. The bytes are swapped in/out by the client:
   are migrated to Xet by a background job, and downloads go through a **Git LFS
   bridge** that reconstructs the file and returns a single URL.
 
-Our `git-openxet` filter plays the role of the Xet-aware client, against the
-OpenXet CAS instead of the HuggingFace Hub.
-
-### Two filters: `/api` vs the real `/v1` protocol
-
-There are two clean/smudge filters in `git-integration/`, so you can see the
-difference dedup granularity makes:
-
-| Filter | Backend | Dedup | Demo |
-|--------|---------|-------|------|
-| `git-openxet` | `/api/upload` (server chunks) | whole **xorb** (~60 MiB) | `demo.sh` |
-| `git-openxet-protocol` | `/v1/*` via `openxet-client` (client chunks) | **chunk** (~64 KiB) | `demo-chunk-dedup.sh` |
-
-```bash
-examples/git-integration/demo-chunk-dedup.sh
-```
-
-The protocol demo is the faithful equivalent of `hf_xet`. It commits a **20 MiB**
-file (a *single* xorb), then appends 1 MiB and commits again. Because dedup is
-at the chunk level, the second commit grows the CAS by only ~1 MiB — the bytes
-that actually changed. The whole-xorb `/api` path can't do this: appending to a
-single-xorb file forces it to re-store the entire new xorb.
+Our `git-openxet-protocol` filter plays the role of the Xet-aware client,
+against the OpenXet CAS instead of the HuggingFace Hub.
 
 Under the hood `git-openxet-protocol` shells out to `openxet-client`
 (`crates/client`), a reference Xet protocol client that:
@@ -124,28 +119,16 @@ OpenXet is the content store those pointers resolve against. This is exactly the
 split HuggingFace uses: the Hub holds repo/branch/commit metadata, and Xet holds
 the deduplicated bytes.
 
-### Two ways to talk to the server
+### The wire protocol
 
-| Path | Endpoints | Dedup granularity | Who chunks |
-|------|-----------|-------------------|------------|
-| **Convenience API** (used by this demo and the web UI) | `POST /api/upload`, `POST /api/upload/init` + parts + `complete`, `GET /api/files/{hash}/content` | **xorb** (~60 MiB pack) | server |
-| **Xet wire protocol** (real `xet-core` / `huggingface_hub` clients) | `POST /v1/xorbs/default/{hash}`, `POST /v1/shards`, `GET /v1/reconstructions/{file_id}`, `GET /v1/chunks/default-merkledb/{hash}` | **chunk** (~64 KiB) | client |
+The server speaks only the Xet wire protocol (the same `/v1/*` endpoints real
+`xet-core` / `huggingface_hub` clients use): `POST /v1/xorbs/default/{hash}`,
+`POST /v1/shards`, `GET /v1/reconstructions/{file_id}`, and
+`GET /v1/chunks/default-merkledb/{hash}`. Chunking happens client-side, so dedup
+is at **chunk** granularity (~64 KiB).
 
-The convenience API is the simplest way to drive the store from a shell and is
-what the demo uses. Two caveats it exercises:
-
-- **Single-shot `POST /api/upload` is capped at 64 MiB** (the server body
-  limit). Larger files must use the multipart session API
-  (`init` → `PUT` parts → `complete`), which is what `commit()` in the demo
-  does, with 32 MiB parts.
-- **Dedup is at xorb granularity here**, because the server packs each upload
-  into fresh xorbs and only dedups whole identical xorbs. So unchanged data only
-  dedups once a dataset spans more than one ~60 MiB xorb (hence the 130 MiB file
-  in the demo). It does *not* yet consult the global chunk index to reuse
-  individual chunks across differently-packed uploads.
-
-True **chunk-level, cross-revision** dedup is a property of the Xet wire
-protocol: the client computes chunk hashes locally, asks the server
+**Chunk-level, cross-revision** dedup works like this: the client computes chunk
+hashes locally, asks the server
 `GET /v1/chunks/default-merkledb/{hash}` which chunks already exist, builds xorbs
 containing only the *new* chunks, uploads them, and then registers a shard whose
 file reconstruction references chunks across both new and pre-existing xorbs.

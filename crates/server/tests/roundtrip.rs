@@ -3,7 +3,9 @@ mod helpers;
 use openxet_cas_types::reconstruction::QueryReconstructionResponse;
 use openxet_cas_types::shard::{Shard, ShardHeader};
 
-use helpers::{TestServer, build_upload_artifacts, generate_test_data, upload_artifacts};
+use helpers::{
+    TestServer, build_upload_artifacts, download_via_protocol, generate_test_data, upload_artifacts,
+};
 
 /// Full CAS protocol round-trip: upload xorbs → upload shard → reconstruct → verify data.
 #[tokio::test]
@@ -46,19 +48,9 @@ async fn test_cas_upload_then_reconstruct() {
         );
     }
 
-    // Verify via management content endpoint (full data integrity check)
-    let content_resp = server
-        .client
-        .get(format!(
-            "{}/api/files/{}/content",
-            server.base_url, artifacts.file_hash
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(content_resp.status(), 200);
-    let downloaded = content_resp.bytes().await.unwrap();
-    assert_eq!(downloaded.as_ref(), data.as_slice());
+    // Full data integrity check: download via the protocol (fetch_info ranges)
+    let downloaded = download_via_protocol(&server, &artifacts.file_hash).await;
+    assert_eq!(downloaded, data);
 }
 
 /// Xorb uploads are idempotent.
@@ -96,62 +88,6 @@ async fn test_xorb_upload_idempotent() {
     assert_eq!(resp.status(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["was_inserted"], false);
-}
-
-/// Management upload endpoint round-trip.
-#[tokio::test]
-async fn test_management_upload_then_download() {
-    let server = TestServer::start().await;
-    let data = generate_test_data(128 * 1024);
-
-    // Upload via management endpoint (no auth required)
-    let resp = server
-        .client
-        .post(format!("{}/api/upload", server.base_url))
-        .body(data.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let upload_resp: serde_json::Value = resp.json().await.unwrap();
-    let file_hash = upload_resp["file_hash"].as_str().unwrap();
-    assert_eq!(upload_resp["file_size"], data.len());
-
-    // Download content
-    let resp = server
-        .client
-        .get(format!("{}/api/files/{file_hash}/content", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), data.as_slice());
-
-    // Verify stats
-    let resp = server
-        .client
-        .get(format!("{}/api/stats", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let stats: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(stats["files_count"], 1);
-    assert!(stats["xorbs_count"].as_u64().unwrap() >= 1);
-    assert!(stats["shards_count"].as_u64().unwrap() >= 1);
-
-    // Verify file list
-    let resp = server
-        .client
-        .get(format!("{}/api/files", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let files: Vec<serde_json::Value> = resp.json().await.unwrap();
-    assert_eq!(files.len(), 1);
-    assert_eq!(files[0]["hash"].as_str().unwrap(), file_hash);
 }
 
 /// All CAS endpoints require authentication.
@@ -284,67 +220,4 @@ async fn test_xorb_hash_mismatch_rejected() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 400);
-}
-
-/// Multipart upload session flow.
-#[tokio::test]
-async fn test_multipart_upload_flow() {
-    let server = TestServer::start().await;
-    let data = generate_test_data(100 * 1024); // 100 KiB
-
-    // Init
-    let resp = server
-        .client
-        .post(format!("{}/api/upload/init", server.base_url))
-        .json(&serde_json::json!({ "file_size": data.len() }))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let init: serde_json::Value = resp.json().await.unwrap();
-    let session_id = init["session_id"].as_str().unwrap();
-
-    // Upload in two parts
-    let mid = data.len() / 2;
-    let resp = server
-        .client
-        .put(format!("{}/api/upload/{session_id}/0", server.base_url))
-        .body(data[..mid].to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    let resp = server
-        .client
-        .put(format!("{}/api/upload/{session_id}/1", server.base_url))
-        .body(data[mid..].to_vec())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-
-    // Complete
-    let resp = server
-        .client
-        .post(format!(
-            "{}/api/upload/{session_id}/complete",
-            server.base_url
-        ))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    let upload_resp: serde_json::Value = resp.json().await.unwrap();
-    let file_hash = upload_resp["file_hash"].as_str().unwrap();
-
-    // Verify content
-    let resp = server
-        .client
-        .get(format!("{}/api/files/{file_hash}/content", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
-    assert_eq!(resp.bytes().await.unwrap().as_ref(), data.as_slice());
 }

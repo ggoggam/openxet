@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Generated wasm package (mise run fe:wasm)
+src/lib/openxet-wasm/

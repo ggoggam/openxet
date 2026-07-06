@@ -4,9 +4,6 @@
 # wire protocol (/v1/*) via the `openxet-client` binary, giving CHUNK-LEVEL,
 # cross-revision deduplication (the same model HuggingFace's hf_xet uses).
 #
-# Contrast with the sibling `git-openxet` filter, which uses the simpler
-# `/api/upload` endpoint and dedups at whole-xorb granularity.
-#
 #   • clean  (git add):      file bytes on stdin  -> openxet-client put -> pointer
 #   • smudge (git checkout): pointer on stdin     -> openxet-client get -> bytes
 #

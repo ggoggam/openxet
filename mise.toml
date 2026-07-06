@@ -1,11 +1,20 @@
 [env]
 HF_XET_ENDPOINT="http://localhost:8080"
 
+# Rust itself is expected via rustup (see README); everything else is
+# provisioned by `mise install`.
+[tools]
+bun = "latest"
+uv = "latest"
+prek = "latest"
+"github:rustwasm/wasm-pack" = "latest"
+
 [tasks."pre-commit"]
 description = "Run pre-commit checks via prek"
 run = "prek run --show-diff-on-failure --color=always --all-files --hook-stage=manual"
 
 [tasks.jwt]
+description = "Mint a write-scope JWT for the default dev secret"
 run = """
 #!/usr/bin/env -S uv run --script
 # /// script
@@ -36,7 +45,7 @@ run = "docker compose -f docker/compose.rustfs.yaml down --remove-orphans"
 alias = "down"
 
 [tasks.docker-log]
-description = "view docker lgos"
+description = "View docker logs"
 run = "docker compose -f docker/compose.rustfs.yaml logs --tail 100"
 alias = "log"
 
@@ -84,7 +93,7 @@ run = "cargo fmt --all --check"
 
 [tasks.check]
 description = "Run fmt check, clippy, and tests"
-depends = ["fmt-check", "lint", "test"]
+depends = ["fmt:check", "lint", "test"]
 
 # ── Frontend ──────────────────────────────────────────────────────────────────
 
@@ -93,15 +102,45 @@ description = "Install frontend dependencies"
 run = "bun install"
 dir = "web"
 
+[tasks."fe:wasm"]
+description = "Build the openxet-wasm package used by the upload page"
+run = [
+  "rustup target add wasm32-unknown-unknown",
+  "wasm-pack build crates/wasm --target web --release --out-dir {{config_root}}/web/src/lib/openxet-wasm",
+]
+sources = [
+  "Cargo.lock",
+  "crates/wasm/**/*",
+  "crates/chunking/**/*",
+  "crates/hashing/**/*",
+  "crates/cas_types/**/*",
+]
+outputs = ["web/src/lib/openxet-wasm/openxet_wasm_bg.wasm"]
+
 [tasks."fe:build"]
 description = "Build frontend for production"
-depends = ["fe:install"]
-sources = ["src/*"]
+depends = ["fe:install", "fe:wasm"]
+sources = [
+  "src/**/*",
+  "index.html",
+  "package.json",
+  "bun.lock",
+  "vite.config.ts",
+  "tsconfig*.json",
+]
+outputs = ["dist/index.html"]
 run = "bun run build"
+dir = "web"
+
+[tasks."fe:dev"]
+description = "Run the frontend dev server (proxies /v1 to localhost:8080)"
+depends = ["fe:install", "fe:wasm"]
+run = "bun run dev"
 dir = "web"
 
 [tasks."fe:lint"]
 description = "Lint frontend code"
+depends = ["fe:install"]
 run = "bun run lint"
 dir = "web"
 
@@ -110,7 +149,7 @@ dir = "web"
 [tasks.dev]
 description = "Run the server in debug mode"
 depends = ["build", "fe:build"]
-run = "cargo run"
+run = "cargo run --bin openxet-server"
 
 [tasks.clean]
 description = "Clean build artifacts"

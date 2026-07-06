@@ -316,14 +316,16 @@ function SqlEditor({
 function QueryResults({ result }: { result: QueryResult }) {
   const [page, setPage] = useState(0);
 
+  // Reset to first page when results change (render-time state adjustment)
+  const [prevResult, setPrevResult] = useState(result);
+  if (prevResult !== result) {
+    setPrevResult(result);
+    setPage(0);
+  }
+
   const totalPages = Math.ceil(result.rows.length / ROWS_PER_PAGE);
   const start = page * ROWS_PER_PAGE;
   const pageRows = result.rows.slice(start, start + ROWS_PER_PAGE);
-
-  // Reset to first page when results change
-  useEffect(() => {
-    setPage(0);
-  }, [result]);
 
   return (
     <div className="space-y-2">

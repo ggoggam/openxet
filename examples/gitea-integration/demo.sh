@@ -17,7 +17,7 @@
 #   6. Fresh-clones from Gitea and verifies the smudge filter restores the
 #      bytes exactly.
 #
-# Requirements: bash, git, docker compose, cargo, curl, python3.
+# Requirements: bash, git, docker compose, cargo, curl.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,16 +43,21 @@ fail() { printf '\033[1;31m  ✗ %s\033[0m\n' "$*" >&2; exit 1; }
 
 filesize() { wc -c < "$1" | tr -d ' '; }
 sha256()   { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'; }
-stored_bytes() { curl -fsS "$OPENXET_URL/api/stats" | python3 -c "import sys,json;print(json.load(sys.stdin)['total_size_bytes'])"; }
-wait_for() { # wait_for <url> <name>
-  for _ in $(seq 1 60); do curl -fsS "$1" >/dev/null 2>&1 && { ok "$2 is up"; return 0; }; sleep 2; done
+# Sum of all object sizes in the CAS bucket, via the aws-cli sidecar.
+stored_bytes() {
+  "${COMPOSE[@]}" run --rm --entrypoint aws rustfs-init \
+    --endpoint-url http://rustfs:9000 s3 ls s3://openxet --recursive --summarize 2>/dev/null \
+    | awk '/Total Size/{print $3}'
+}
+wait_for() { # wait_for <url> <name> — succeeds on any HTTP response
+  for _ in $(seq 1 60); do curl -s -o /dev/null "$1" 2>/dev/null && { ok "$2 is up"; return 0; }; sleep 2; done
   fail "$2 did not come up ($1)"
 }
 
 # ─── services ─────────────────────────────────────────────────────────────────
 log "Starting gitea + openxet + rustfs…"
 "${COMPOSE[@]}" up -d --build
-wait_for "$OPENXET_URL/api/stats" "OpenXet CAS"
+wait_for "$OPENXET_URL/v1/shards" "OpenXet CAS"
 wait_for "$GITEA_URL/api/healthz" "Gitea"
 
 log "Building openxet-client (release)…"

@@ -1,6 +1,6 @@
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
+import { Link, useNavigate } from "@tanstack/react-router";
+import { Search, Trash2 } from "lucide-react";
 import {
   Table,
   TableBody,
@@ -9,30 +9,39 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Skeleton } from "@/components/ui/skeleton";
-import { fetchFiles } from "@/lib/api";
-import { truncateHash } from "@/lib/format";
+import {
+  listCatalog,
+  removeFromCatalog,
+  type CatalogEntry,
+} from "@/lib/catalog";
+import { formatBytes, truncateHash } from "@/lib/format";
+
+const HASH_RE = /^[0-9a-f]{64}$/i;
 
 export function FilesPage() {
+  const navigate = useNavigate();
+  const [entries, setEntries] = useState<CatalogEntry[]>(listCatalog);
   const [filter, setFilter] = useState("");
-  const { data: files, isLoading, error } = useQuery({
-    queryKey: ["files"],
-    queryFn: fetchFiles,
-  });
+  const [openHash, setOpenHash] = useState("");
 
-  if (error) {
-    return (
-      <div className="text-destructive">
-        Failed to load files: {error.message}
-      </div>
-    );
-  }
+  const handleRemove = (hash: string) => {
+    removeFromCatalog(hash);
+    setEntries(listCatalog());
+  };
 
-  const filtered = files?.filter(
-    (f) =>
-      f.hash.toLowerCase().includes(filter.toLowerCase()) ||
-      f.shard_hash.toLowerCase().includes(filter.toLowerCase())
+  const handleOpen = () => {
+    const hash = openHash.trim().toLowerCase();
+    if (HASH_RE.test(hash)) {
+      navigate({ to: "/files/$hash", params: { hash } });
+    }
+  };
+
+  const filtered = entries.filter(
+    (e) =>
+      e.hash.toLowerCase().includes(filter.toLowerCase()) ||
+      e.name.toLowerCase().includes(filter.toLowerCase()),
   );
 
   return (
@@ -40,58 +49,90 @@ export function FilesPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Files</h1>
         <p className="text-muted-foreground">
-          All files stored in the CAS server.
+          Files uploaded from this browser. The CAS itself is content-addressed
+          and keeps no name index — this catalog is stored locally.
         </p>
       </div>
 
-      <Input
-        placeholder="Filter by hash..."
-        value={filter}
-        onChange={(e) => setFilter(e.target.value)}
-        className="max-w-sm"
-      />
+      <div className="flex flex-wrap items-center gap-2">
+        <Input
+          placeholder="Filter by name or hash..."
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          className="max-w-sm"
+        />
+        <div className="ml-auto flex items-center gap-2">
+          <Input
+            placeholder="Open any file by 64-hex hash..."
+            value={openHash}
+            onChange={(e) => setOpenHash(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && handleOpen()}
+            className="w-96 font-mono text-xs"
+          />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleOpen}
+            disabled={!HASH_RE.test(openHash.trim())}
+          >
+            <Search className="size-4" />
+            Inspect
+          </Button>
+        </div>
+      </div>
 
       <div className="rounded-md border">
         <Table>
           <TableHeader>
             <TableRow>
+              <TableHead>Name</TableHead>
               <TableHead>File Hash</TableHead>
-              <TableHead>Shard Hash</TableHead>
+              <TableHead className="text-right">Size</TableHead>
+              <TableHead>Uploaded</TableHead>
+              <TableHead className="w-12" />
             </TableRow>
           </TableHeader>
           <TableBody>
-            {isLoading ? (
-              Array.from({ length: 5 }).map((_, i) => (
-                <TableRow key={i}>
-                  <TableCell>
-                    <Skeleton className="h-5 w-48" />
-                  </TableCell>
-                  <TableCell>
-                    <Skeleton className="h-5 w-48" />
-                  </TableCell>
-                </TableRow>
-              ))
-            ) : filtered && filtered.length > 0 ? (
-              filtered.map((file) => (
-                <TableRow key={file.hash}>
+            {filtered.length > 0 ? (
+              filtered.map((entry) => (
+                <TableRow key={entry.hash}>
+                  <TableCell className="font-medium">{entry.name}</TableCell>
                   <TableCell>
                     <Link
                       to="/files/$hash"
-                      params={{ hash: file.hash }}
+                      params={{ hash: entry.hash }}
                       className="font-mono text-sm text-primary hover:underline"
                     >
-                      {truncateHash(file.hash, 12)}
+                      {truncateHash(entry.hash, 12)}
                     </Link>
                   </TableCell>
-                  <TableCell className="font-mono text-sm text-muted-foreground">
-                    {truncateHash(file.shard_hash, 12)}
+                  <TableCell className="text-right">
+                    {formatBytes(entry.size)}
+                  </TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {new Date(entry.uploadedAt).toLocaleString()}
+                  </TableCell>
+                  <TableCell>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => handleRemove(entry.hash)}
+                      title="Remove from local catalog (does not delete from the CAS)"
+                    >
+                      <Trash2 className="size-4 text-muted-foreground" />
+                    </Button>
                   </TableCell>
                 </TableRow>
               ))
             ) : (
               <TableRow>
-                <TableCell colSpan={2} className="text-center text-muted-foreground">
-                  {filter ? "No files match your filter." : "No files stored yet."}
+                <TableCell
+                  colSpan={5}
+                  className="text-center text-muted-foreground"
+                >
+                  {filter
+                    ? "No files match your filter."
+                    : "Nothing uploaded from this browser yet. Files uploaded elsewhere can be opened by hash above."}
                 </TableCell>
               </TableRow>
             )}

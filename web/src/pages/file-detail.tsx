@@ -375,6 +375,14 @@ function FileContentPreview({
     return isParquetProbe(new Uint8Array(probe.data));
   }, [probe.data]);
 
+  // Parquet is range-read by DuckDB directly from a URL, which carries a
+  // short-lived token in its query string — mint it on demand.
+  const contentUrl = useQuery({
+    queryKey: ["file-content-url", hash],
+    queryFn: () => fileContentUrl(hash),
+    enabled: isParquet,
+  });
+
   // Only fetch full content for non-parquet files.
   const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", hash],
@@ -459,18 +467,17 @@ function FileContentPreview({
             <Skeleton className="h-4 w-5/6" />
           </div>
         ) : isParquet ? (
-          <Suspense
-            fallback={
-              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
-                Loading table viewer...
-              </div>
-            }
-          >
-            <LazyTablePreview
-              format="parquet"
-              contentUrl={fileContentUrl(hash)}
-            />
-          </Suspense>
+          contentUrl.data ? (
+            <Suspense
+              fallback={
+                <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                  Loading table viewer...
+                </div>
+              }
+            >
+              <LazyTablePreview format="parquet" contentUrl={contentUrl.data} />
+            </Suspense>
+          ) : null
         ) : detected?.kind === "image" ? (
           <ImagePreview bytes={detected.bytes} mime={detected.mime} />
         ) : detected?.kind === "pdf" ? (

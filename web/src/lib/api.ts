@@ -1,16 +1,10 @@
+// Xet wire-protocol client (/v1/*). The server exposes nothing else:
+// uploads are chunked/hashed/packed in the browser (openxet-wasm) and POSTed
+// as xorbs + a shard; downloads go through reconstruction/content endpoints.
+
+import { mintToken, type Scope } from "./auth";
+
 // ─── Types ───────────────────────────────────────────────────────────────────
-
-export interface StatsResponse {
-  files_count: number;
-  xorbs_count: number;
-  shards_count: number;
-  total_size_bytes: number;
-}
-
-export interface FileEntry {
-  hash: string;
-  shard_hash: string;
-}
 
 export interface ChunkRange {
   start: number;
@@ -40,62 +34,52 @@ export interface ReconstructionResponse {
   fetch_info: Record<string, FetchInfo[]>;
 }
 
-export interface FileDetailResponse {
+export interface FileDetail {
   hash: string;
   total_size: number;
   reconstruction: ReconstructionResponse;
 }
 
-export interface XorbEntry {
-  hash: string;
-  size: number;
-  chunk_count: number;
-}
-
-export interface UploadResponse {
+export interface UploadResult {
   file_hash: string;
-  xorb_hashes: string[];
-  shard_hash: string;
   file_size: number;
   chunk_count: number;
-  xorb_count: number;
+  xorb_hashes: string[];
 }
 
-// ─── API Functions ───────────────────────────────────────────────────────────
+// ─── HTTP helpers ────────────────────────────────────────────────────────────
 
-const BASE = "/api";
-
-async function fetchJson<T>(path: string): Promise<T> {
-  const res = await fetch(`${BASE}${path}`);
-  if (!res.ok) {
+async function authFetch(
+  path: string,
+  scope: Scope,
+  init?: RequestInit,
+): Promise<Response> {
+  const token = await mintToken(scope);
+  const res = await fetch(path, {
+    ...init,
+    headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok && res.status !== 206) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
     throw new Error(body.error || `HTTP ${res.status}`);
   }
-  return res.json();
+  return res;
 }
 
-export function fetchStats(): Promise<StatsResponse> {
-  return fetchJson("/stats");
-}
+// ─── Read paths ──────────────────────────────────────────────────────────────
 
-export function fetchFiles(): Promise<FileEntry[]> {
-  return fetchJson("/files");
-}
-
-export function fetchFileDetail(hash: string): Promise<FileDetailResponse> {
-  return fetchJson(`/files/${hash}`);
-}
-
-export function fetchXorbs(): Promise<XorbEntry[]> {
-  return fetchJson("/xorbs");
+export async function fetchFileDetail(hash: string): Promise<FileDetail> {
+  const res = await authFetch(`/v1/reconstructions/${hash}`, "read");
+  const reconstruction: ReconstructionResponse = await res.json();
+  const total_size = reconstruction.terms.reduce(
+    (sum, t) => sum + t.unpacked_length,
+    0,
+  );
+  return { hash, total_size, reconstruction };
 }
 
 export async function fetchFileContent(hash: string): Promise<ArrayBuffer> {
-  const res = await fetch(`${BASE}/files/${hash}/content`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
+  const res = await authFetch(`/v1/content/${hash}`, "read");
   return res.arrayBuffer();
 }
 
@@ -105,102 +89,75 @@ export async function fetchFileContentRange(
   start: number,
   end: number,
 ): Promise<ArrayBuffer> {
-  const res = await fetch(`${BASE}/files/${hash}/content`, {
+  const res = await authFetch(`/v1/content/${hash}`, "read", {
     headers: { Range: `bytes=${start}-${end}` },
   });
-  if (!res.ok && res.status !== 206) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
   return res.arrayBuffer();
 }
 
-/** Returns the URL for streaming file content (supports HTTP Range requests). */
-export function fileContentUrl(hash: string): string {
-  return `${BASE}/files/${hash}/content`;
+/**
+ * URL for streaming file content (supports HTTP Range requests). Carries the
+ * token as a query parameter so consumers that can't set headers (download
+ * links, DuckDB-WASM range reads) can fetch it directly.
+ */
+export async function fileContentUrl(hash: string): Promise<string> {
+  const token = await mintToken("read");
+  return `/v1/content/${hash}?token=${token}`;
 }
 
-// ─── Multipart Upload ────────────────────────────────────────────────────────
+// ─── Upload (client-side chunking via openxet-wasm) ─────────────────────────
 
-const PART_SIZE = 32 * 1024 * 1024; // 32 MiB
-
-interface InitUploadResponse {
-  session_id: string;
-}
-
-interface PartUploadResponse {
-  received: number;
-}
-
-async function initUpload(fileSize: number): Promise<InitUploadResponse> {
-  const res = await fetch(`${BASE}/upload/init`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ file_size: fileSize }),
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-async function uploadPart(
-  sessionId: string,
-  index: number,
-  data: Blob,
-): Promise<PartUploadResponse> {
-  const res = await fetch(`${BASE}/upload/${sessionId}/${index}`, {
-    method: "PUT",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: data,
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-async function completeUpload(sessionId: string): Promise<UploadResponse> {
-  const res = await fetch(`${BASE}/upload/${sessionId}/complete`, {
-    method: "POST",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(body.error || `HTTP ${res.status}`);
-  }
-  return res.json();
-}
-
-async function abortUpload(sessionId: string): Promise<void> {
-  await fetch(`${BASE}/upload/${sessionId}`, { method: "DELETE" }).catch(
-    () => {},
-  );
+async function loadWasm() {
+  const mod = await import("./openxet-wasm/openxet_wasm");
+  await mod.default();
+  return mod;
 }
 
 export async function uploadFile(
   file: File,
   onProgress?: (uploaded: number, total: number) => void,
-): Promise<UploadResponse> {
-  const { session_id } = await initUpload(file.size);
+): Promise<UploadResult> {
+  const data = new Uint8Array(await file.arrayBuffer());
+  const wasm = await loadWasm();
+  const plan = wasm.plan_upload(data);
 
   try {
-    let uploaded = 0;
-    let partIndex = 0;
-
-    while (uploaded < file.size) {
-      const end = Math.min(uploaded + PART_SIZE, file.size);
-      const part = file.slice(uploaded, end);
-      await uploadPart(session_id, partIndex, part);
-      uploaded = end;
-      partIndex++;
-      onProgress?.(uploaded, file.size);
+    const xorbCount = plan.xorb_count;
+    const xorbHashes: string[] = [];
+    const xorbSizes: number[] = [];
+    let total = 0;
+    for (let i = 0; i < xorbCount; i++) {
+      xorbHashes.push(plan.xorb_hash(i));
+      const size = plan.xorb_data(i).length;
+      xorbSizes.push(size);
+      total += size;
     }
 
-    return await completeUpload(session_id);
-  } catch (err) {
-    await abortUpload(session_id);
-    throw err;
+    let uploaded = 0;
+    onProgress?.(0, total);
+    for (let i = 0; i < xorbCount; i++) {
+      await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, "write", {
+        method: "POST",
+        headers: { "Content-Type": "application/octet-stream" },
+        body: new Blob([new Uint8Array(plan.xorb_data(i))]),
+      });
+      uploaded += xorbSizes[i];
+      onProgress?.(uploaded, total);
+    }
+
+    await authFetch("/v1/shards", "write", {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: new Blob([new Uint8Array(plan.shard_bytes)]),
+    });
+
+    return {
+      file_hash: plan.file_hash,
+      file_size: file.size,
+      chunk_count: plan.chunk_count,
+      xorb_hashes: xorbHashes,
+    };
+  } finally {
+    plan.free();
   }
 }

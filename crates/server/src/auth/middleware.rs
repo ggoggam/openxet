@@ -6,17 +6,26 @@ use crate::state::AppState;
 
 use super::jwt::{Claims, Scope, validate_token};
 
-/// Extract and validate the Bearer token from the Authorization header.
+/// Extract the token from the Authorization header, or from a `token` query
+/// parameter. The query form is the presigned-URL analog used by the
+/// reconstruction response's fetch_info URLs: xet-core fetches those URLs
+/// without attaching any Authorization header (on huggingface.co they are
+/// presigned S3 URLs), so the URL itself must carry the credential.
 fn extract_bearer_token(parts: &Parts) -> Result<&str, AppError> {
-    let header = parts
-        .headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))?;
+    if let Some(header) = parts.headers.get("authorization") {
+        let header = header
+            .to_str()
+            .map_err(|_| AppError::Unauthorized("invalid authorization header".to_string()))?;
+        return header.strip_prefix("Bearer ").ok_or_else(|| {
+            AppError::Unauthorized("invalid authorization header format".to_string())
+        });
+    }
 
-    header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AppError::Unauthorized("invalid authorization header format".to_string()))
+    parts
+        .uri
+        .query()
+        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
+        .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))
 }
 
 /// Axum extractor that requires at least `read` scope.

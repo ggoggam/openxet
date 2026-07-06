@@ -1,13 +1,43 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Database, Files, HardDrive, Upload } from "lucide-react";
+import { Database, Files, KeyRound, Upload } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { setSecret, useSecret } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const navItems = [
-  { to: "/", label: "Dashboard", icon: Database },
-  { to: "/files", label: "Files", icon: Files },
-  { to: "/xorbs", label: "Xorbs", icon: HardDrive },
+  { to: "/", label: "Files", icon: Files },
   { to: "/upload", label: "Upload", icon: Upload },
 ] as const;
+
+/** The server authenticates /v1 calls with JWTs signed by its
+ * OPENXET_AUTH_SECRET; the UI mints tokens locally from this secret. */
+function SecretField() {
+  const secret = useSecret();
+
+  return (
+    <div
+      className="ml-auto flex items-center gap-2"
+      title="OPENXET_AUTH_SECRET of the server — used to mint access tokens in this browser"
+    >
+      <KeyRound
+        className={cn(
+          "size-4",
+          secret ? "text-muted-foreground" : "text-amber-500",
+        )}
+      />
+      <Input
+        type="password"
+        placeholder="Auth secret required"
+        value={secret}
+        onChange={(e) => setSecret(e.target.value)}
+        className={cn(
+          "h-8 w-48 text-sm",
+          !secret && "border-amber-500 ring-1 ring-amber-500/50",
+        )}
+      />
+    </div>
+  );
+}
 
 export function Layout({ children }: { children: React.ReactNode }) {
   const router = useRouterState();
@@ -25,7 +55,9 @@ export function Layout({ children }: { children: React.ReactNode }) {
           <nav className="flex items-center gap-1">
             {navItems.map(({ to, label, icon: Icon }) => {
               const isActive =
-                to === "/" ? currentPath === "/" : currentPath.startsWith(to);
+                to === "/"
+                  ? currentPath === "/" || currentPath.startsWith("/files")
+                  : currentPath.startsWith(to);
               return (
                 <Link
                   key={to}
@@ -43,6 +75,8 @@ export function Layout({ children }: { children: React.ReactNode }) {
               );
             })}
           </nav>
+
+          <SecretField />
         </div>
       </header>
 

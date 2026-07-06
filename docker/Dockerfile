@@ -1,13 +1,16 @@
-# ── Stage 1: Build Rust binary ────────────────────────────────────────────────
+# ── Stage 1: Build Rust binary + wasm upload pipeline ────────────────────────
 FROM rust:1.93-slim AS builder
 
-RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y pkg-config libssl-dev curl && rm -rf /var/lib/apt/lists/*
+RUN rustup target add wasm32-unknown-unknown && \
+    curl -sSfL https://rustwasm.github.io/wasm-pack/installer/init.sh | sh
 
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates/ crates/
 
 RUN cargo build --release --bin openxet-server
+RUN wasm-pack build crates/wasm --target web --release --out-dir /app/wasm-pkg
 
 # ── Stage 2: Build frontend ──────────────────────────────────────────────────
 FROM oven/bun:1 AS frontend
@@ -17,6 +20,7 @@ COPY web/package.json web/bun.lock ./
 RUN bun install --frozen-lockfile
 
 COPY web/ .
+COPY --from=builder /app/wasm-pkg src/lib/openxet-wasm
 RUN bun run build
 
 # ── Stage 3: Runtime ─────────────────────────────────────────────────────────

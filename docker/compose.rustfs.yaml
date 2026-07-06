@@ -55,7 +55,8 @@ services:
       OPENXET_S3_SECRET_ACCESS_KEY: rustfsadmin
       OPENXET_S3_ALLOW_HTTP: "true"
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/api/stats"]
+      # /v1/shards answers 405 to GET; any HTTP response means the server is up
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/v1/shards"]
       interval: 10s
       timeout: 5s
       retries: 3

@@ -3,16 +3,15 @@
 # Git + OpenXet integration demo — CHUNK-LEVEL dedup via the Xet wire protocol
 # ===========================================================================
 #
-# Same git clean/smudge story as demo.sh, but the filter drives the real
-# /v1/* Xet protocol through the `openxet-client` binary. This gives
-# chunk-level, cross-revision dedup — exactly what HuggingFace's hf_xet does —
-# instead of the whole-xorb dedup of the /api path.
+# A git clean/smudge filter drives the real /v1/* Xet protocol through the
+# `openxet-client` binary. This gives chunk-level, cross-revision dedup —
+# exactly what HuggingFace's hf_xet does.
 #
 # The tell: we use a SMALL (20 MiB) file that fits in a single xorb. Appending
-# to it would force the /api path to re-store the entire new xorb; with chunk
-# dedup the second commit costs only the bytes that actually changed.
+# to it would force a whole-xorb dedup scheme to re-store the entire new xorb;
+# with chunk dedup the second commit costs only the bytes that actually changed.
 #
-# Requirements: bash, git, cargo, curl, python3.
+# Requirements: bash, git, cargo, curl.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -40,7 +39,8 @@ trap cleanup EXIT
 
 filesize() { wc -c < "$1" | tr -d ' '; }
 sha256()   { shasum -a 256 "$1" 2>/dev/null | awk '{print $1}' || sha256sum "$1" | awk '{print $1}'; }
-stored_bytes() { curl -fsS "$OPENXET_URL/api/stats" | python3 -c "import sys,json;print(json.load(sys.stdin)['total_size_bytes'])"; }
+stored_bytes() { du -sk "$DATA_DIR" | awk '{print $1 * 1024}'; }
+server_up()    { curl -s -o /dev/null "$OPENXET_URL/v1/shards"; } # any HTTP response = up
 
 # ─── build server + protocol client ──────────────────────────────────────────
 log "Building openxet-server and openxet-client (release)…"
@@ -51,8 +51,8 @@ OPENXET_HOST=127.0.0.1 OPENXET_PORT="$PORT" OPENXET_DATA_DIR="$DATA_DIR" \
 OPENXET_STORAGE_BACKEND=filesystem OPENXET_AUTH_SECRET="$OPENXET_AUTH_SECRET" \
   ./target/release/openxet-server >"$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
-for _ in $(seq 1 50); do curl -fsS "$OPENXET_URL/api/stats" >/dev/null 2>&1 && break; sleep 0.2; done
-curl -fsS "$OPENXET_URL/api/stats" >/dev/null 2>&1 || { cat "$WORK_DIR/server.log"; fail "server did not start"; }
+for _ in $(seq 1 50); do server_up && break; sleep 0.2; done
+server_up || { cat "$WORK_DIR/server.log"; fail "server did not start"; }
 ok "Server is up"
 
 # ─── git repo wired to the protocol filter ───────────────────────────────────
@@ -86,8 +86,8 @@ log "Storage growth from the v2 commit"
 echo "    full size of v2          : $(filesize dataset.bin) bytes (one xorb)"
 echo "    bytes appended           : $APPENDED"
 echo "    CAS growth for v2 commit : $DELTA bytes"
-# Chunk dedup => growth ≈ the appended region, far below the whole file. The
-# /api (whole-xorb) path would have re-stored the entire ~21 MiB xorb here.
+# Chunk dedup => growth ≈ the appended region, far below the whole file. A
+# whole-xorb scheme would have re-stored the entire ~21 MiB xorb here.
 if [[ "$DELTA" -lt $((STORED_V1 / 2)) ]]; then
   ok "v2 cost ≈ the appended data, not the whole xorb -> CHUNK-LEVEL dedup"
 else

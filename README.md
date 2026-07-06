@@ -22,6 +22,7 @@ OpenXet breaks files into content-defined chunks using a Gearhash CDC algorithm,
 - [Rust](https://www.rust-lang.org/tools/install) (latest stable)
 - [mise](https://mise.jdx.dev/) (recommended for toolchain management)
 - [bun](https://bun.sh/) (for frontend)
+- [wasm-pack](https://rustwasm.github.io/wasm-pack/) + the `wasm32-unknown-unknown` target (for the frontend's upload pipeline)
 
 ### Setup
 
@@ -34,9 +35,9 @@ cd openxet
 mise trust
 mise install
 
-# Build server and frontend
+# Build server and frontend (fe:build also compiles the wasm upload pipeline)
 cargo build
-cd web && bun install && bun run build && cd ..
+mise run fe:build
 ```
 
 ### Running
@@ -104,25 +105,9 @@ server
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
 
-#### Management API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/stats` | Storage statistics (file/xorb/shard counts, total size) |
-| `GET` | `/api/files` | List all stored files |
-| `GET` | `/api/files/{hash}` | File detail with reconstruction info |
-| `GET` | `/api/files/{hash}/content` | Download reconstructed file content |
-| `GET` | `/api/xorbs` | List all xorbs with chunk counts |
-| `POST` | `/api/upload` | Single-shot file upload (chunks, hashes, stores) |
-
-#### Multipart Upload API
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/upload/init` | Initialize an upload session |
-| `PUT` | `/api/upload/{session_id}/{part_index}` | Upload a part |
-| `POST` | `/api/upload/{session_id}/complete` | Finalize the upload |
-| `DELETE` | `/api/upload/{session_id}` | Abort the upload |
+These are the only API endpoints the server exposes — the same wire protocol
+HuggingFace's `xet-core` / `hf_xet` clients speak. All uploads and downloads,
+including the web UI's and the examples', go through them.
 
 ### Storage Layout
 
@@ -133,18 +118,25 @@ server
 ├── index/
 │   ├── files/              # file_hash → shard_hash mapping
 │   └── chunks/             # chunk_hash → (xorb_hash, chunk_index) mapping
-└── uploads/tmp/            # Temporary multipart upload files
 ```
 
 ## Frontend
 
-The web UI is a React SPA built with TypeScript, Vite, and TailwindCSS. It provides:
+The web UI is a React SPA built with TypeScript, Vite, and TailwindCSS. It
+speaks only the Xet wire protocol, like any other client:
 
-- **Dashboard** -- Storage statistics overview
-- **File browser** -- List files, view reconstruction details, download content
-- **Xorb inspector** -- Browse xorb archives and chunk metadata
-- **File upload** -- Drag-and-drop upload with automatic chunking and deduplication
-- **Table preview** -- Query CSV/Parquet files in-browser using DuckDB WASM with a SQL editor
+- **Upload** -- files are chunked, hashed, and packed into xorbs *in the
+  browser* by `openxet-wasm` (the workspace's own chunking/hashing crates
+  compiled to WebAssembly), then POSTed to `/v1/xorbs` + `/v1/shards`
+- **Files** -- a local catalog (browser localStorage) of files uploaded from
+  this browser, plus "open by hash" for anything else; the CAS itself is
+  content-addressed and has no listing endpoint by design
+- **File detail** -- reconstruction terms from `/v1/reconstructions`, content
+  preview/download via `/v1/content` (text, images, PDF, hex dump, and
+  CSV/Parquet querying in-browser with DuckDB WASM)
+- **Auth** -- paste the server's `OPENXET_AUTH_SECRET` in the header field;
+  the UI mints short-lived JWTs locally via WebCrypto (there is no token
+  endpoint — on huggingface.co that's the Hub's job)
 
 ### Frontend Stack
 

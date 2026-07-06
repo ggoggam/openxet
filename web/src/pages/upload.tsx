@@ -1,7 +1,13 @@
 import { useState, useCallback } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { Upload, FileUp, CheckCircle2, AlertCircle } from "lucide-react";
+import {
+  Upload,
+  FileUp,
+  CheckCircle2,
+  AlertCircle,
+  KeyRound,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -10,11 +16,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { uploadFile, type UploadResponse } from "@/lib/api";
+import { uploadFile, type UploadResult } from "@/lib/api";
+import { useSecret } from "@/lib/auth";
+import { addToCatalog } from "@/lib/catalog";
 import { formatBytes } from "@/lib/format";
 
 export function UploadPage() {
-  const queryClient = useQueryClient();
+  const secret = useSecret();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{
@@ -24,11 +32,14 @@ export function UploadPage() {
   const mutation = useMutation({
     mutationFn: (file: File) =>
       uploadFile(file, (uploaded, total) => setProgress({ uploaded, total })),
-    onSuccess: () => {
+    onSuccess: (result, file) => {
       setProgress(null);
-      queryClient.invalidateQueries({ queryKey: ["stats"] });
-      queryClient.invalidateQueries({ queryKey: ["files"] });
-      queryClient.invalidateQueries({ queryKey: ["xorbs"] });
+      addToCatalog({
+        hash: result.file_hash,
+        name: file.name,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+      });
     },
     onError: () => {
       setProgress(null);
@@ -75,8 +86,9 @@ export function UploadPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Upload</h1>
         <p className="text-muted-foreground">
-          Upload a file to the CAS server. The server will chunk, compress, and
-          store it.
+          Files are chunked, hashed, and packed into xorbs in your browser
+          (WebAssembly), then uploaded over the Xet wire protocol — the same
+          flow HuggingFace's xet client uses.
         </p>
       </div>
 
@@ -88,6 +100,16 @@ export function UploadPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
+          {!secret && (
+            <div className="flex items-center gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
+              <KeyRound className="size-4 shrink-0" />
+              Uploads need a write token. Paste the server's{" "}
+              <code className="font-mono">OPENXET_AUTH_SECRET</code> into the
+              key field in the header (the dev default is{" "}
+              <code className="font-mono">change-me-in-production</code>).
+            </div>
+          )}
+
           {/* Drop zone */}
           <div
             onDrop={handleDrop}
@@ -137,7 +159,7 @@ export function UploadPage() {
                 <Button
                   size="sm"
                   onClick={handleSubmit}
-                  disabled={mutation.isPending}
+                  disabled={mutation.isPending || !secret}
                 >
                   {mutation.isPending ? (
                     "Uploading..."
@@ -153,41 +175,38 @@ export function UploadPage() {
           )}
 
           {/* Upload progress */}
-          {mutation.isPending && progress && (
+          {mutation.isPending && (
             <div className="space-y-2">
-              <div className="flex justify-between text-sm">
-                <span className="text-muted-foreground">
-                  Uploading... {formatBytes(progress.uploaded)} /{" "}
-                  {formatBytes(progress.total)}
-                </span>
-                <span className="font-medium">
-                  {Math.round((progress.uploaded / progress.total) * 100)}%
-                </span>
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div
-                  className="h-full rounded-full bg-primary transition-all duration-200"
-                  style={{
-                    width: `${(progress.uploaded / progress.total) * 100}%`,
-                  }}
-                />
-              </div>
-              {progress.uploaded < progress.total && (
-                <p className="text-xs text-muted-foreground">
-                  Part {Math.ceil(progress.uploaded / (32 * 1024 * 1024))} of{" "}
-                  {Math.ceil(progress.total / (32 * 1024 * 1024))}
-                </p>
-              )}
-              {progress.uploaded >= progress.total && (
-                <p className="text-xs text-muted-foreground">
-                  Processing file on server...
+              {progress ? (
+                <>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">
+                      Uploading xorbs... {formatBytes(progress.uploaded)} /{" "}
+                      {formatBytes(progress.total)}
+                    </span>
+                    <span className="font-medium">
+                      {Math.round((progress.uploaded / progress.total) * 100)}%
+                    </span>
+                  </div>
+                  <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+                    <div
+                      className="h-full rounded-full bg-primary transition-all duration-200"
+                      style={{
+                        width: `${(progress.uploaded / progress.total) * 100}%`,
+                      }}
+                    />
+                  </div>
+                </>
+              ) : (
+                <p className="text-sm text-muted-foreground">
+                  Chunking and hashing in the browser...
                 </p>
               )}
             </div>
           )}
 
           {/* Upload result */}
-          {mutation.isSuccess && <UploadResult result={mutation.data} />}
+          {mutation.isSuccess && <UploadSuccess result={mutation.data} />}
 
           {/* Upload error */}
           {mutation.isError && (
@@ -202,7 +221,7 @@ export function UploadPage() {
   );
 }
 
-function UploadResult({ result }: { result: UploadResponse }) {
+function UploadSuccess({ result }: { result: UploadResult }) {
   return (
     <div className="space-y-3 rounded-md border border-green-500/30 bg-green-500/5 p-4">
       <div className="flex items-center gap-2 text-sm font-medium text-green-700 dark:text-green-400">
@@ -210,8 +229,16 @@ function UploadResult({ result }: { result: UploadResponse }) {
         Upload successful
       </div>
       <div className="grid gap-2 text-sm">
-        <ResultRow label="File Hash" hash={result.file_hash} link="/files" />
-        <ResultRow label="Shard Hash" hash={result.shard_hash} />
+        <div className="flex justify-between gap-2">
+          <span className="text-muted-foreground">File Hash</span>
+          <Link
+            to="/files/$hash"
+            params={{ hash: result.file_hash }}
+            className="font-mono text-xs text-primary hover:underline"
+          >
+            {result.file_hash}
+          </Link>
+        </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">File Size</span>
           <span>{formatBytes(result.file_size)}</span>
@@ -222,43 +249,17 @@ function UploadResult({ result }: { result: UploadResponse }) {
         </div>
         <div className="flex justify-between">
           <span className="text-muted-foreground">Xorbs</span>
-          <span>{result.xorb_count}</span>
+          <span>{result.xorb_hashes.length}</span>
         </div>
         {result.xorb_hashes.map((hash, i) => (
-          <ResultRow
-            key={hash}
-            label={result.xorb_count > 1 ? `Xorb ${i + 1}` : "Xorb Hash"}
-            hash={hash}
-          />
+          <div key={hash} className="flex justify-between gap-2">
+            <span className="text-muted-foreground">
+              {result.xorb_hashes.length > 1 ? `Xorb ${i + 1}` : "Xorb Hash"}
+            </span>
+            <span className="font-mono text-xs">{hash}</span>
+          </div>
         ))}
       </div>
-    </div>
-  );
-}
-
-function ResultRow({
-  label,
-  hash,
-  link,
-}: {
-  label: string;
-  hash: string;
-  link?: string;
-}) {
-  return (
-    <div className="flex justify-between gap-2">
-      <span className="text-muted-foreground">{label}</span>
-      {link ? (
-        <Link
-          to="/files/$hash"
-          params={{ hash }}
-          className="font-mono text-xs text-primary hover:underline"
-        >
-          {hash}
-        </Link>
-      ) : (
-        <span className="font-mono text-xs">{hash}</span>
-      )}
     </div>
   );
 }

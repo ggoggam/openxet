@@ -1339,6 +1339,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "openxet-wasm"
+version = "0.1.0"
+dependencies = [
+ "openxet-cas-types",
+ "openxet-chunking",
+ "openxet-hashing",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "parking_lot"
 version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

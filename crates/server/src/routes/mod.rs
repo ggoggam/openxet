@@ -1,9 +1,7 @@
 mod content;
 mod dedup;
-mod management;
 mod reconstruction;
 mod shard;
-mod upload;
 mod xorb;
 
 use axum::Router;
@@ -91,8 +89,6 @@ pub fn build_router(state: AppState) -> Router {
         );
 
     Router::new()
-        .nest("/api", management::management_router())
-        .nest("/api", upload::upload_router())
         .merge(cas_routes)
         .fallback_service(spa_fallback)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))

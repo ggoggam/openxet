@@ -1,7 +1,6 @@
 //! openxet-client — a reference client for the Xet CAS wire protocol (`/v1/*`).
 //!
-//! Unlike the server's convenience `/api/upload` endpoint (which dedups whole
-//! xorbs), this client performs **chunk-level, cross-revision deduplication**
+//! This client performs **chunk-level, cross-revision deduplication**
 //! the same way HuggingFace's `xet-core` does:
 //!
 //!   put (upload):

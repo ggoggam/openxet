@@ -5,10 +5,8 @@ import {
   Outlet,
 } from "@tanstack/react-router";
 import { Layout } from "@/components/layout";
-import { DashboardPage } from "@/pages/dashboard";
 import { FilesPage } from "@/pages/files";
 import { FileDetailPage } from "@/pages/file-detail";
-import { XorbsPage } from "@/pages/xorbs";
 import { UploadPage } from "@/pages/upload";
 
 const rootRoute = createRootRoute({
@@ -22,7 +20,7 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/",
-  component: DashboardPage,
+  component: FilesPage,
 });
 
 const filesRoute = createRoute({
@@ -37,12 +35,6 @@ const fileDetailRoute = createRoute({
   component: FileDetailPage,
 });
 
-const xorbsRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/xorbs",
-  component: XorbsPage,
-});
-
 const uploadRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/upload",
@@ -53,7 +45,6 @@ const routeTree = rootRoute.addChildren([
   indexRoute,
   filesRoute,
   fileDetailRoute,
-  xorbsRoute,
   uploadRoute,
 ]);
 

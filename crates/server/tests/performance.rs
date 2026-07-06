@@ -81,37 +81,53 @@ async fn test_perf_reconstruction_latency() {
     println!("[perf] reconstruction latency ({iterations} iters): avg={avg_us}us, p99={p99_us}us");
 }
 
-/// Concurrent uploads: 10 parallel 1 MiB files.
+/// Concurrent uploads: 10 parallel 1 MiB files via the CAS protocol.
 #[tokio::test]
 #[ignore]
 async fn test_perf_concurrent_uploads() {
     let server = TestServer::start().await;
+    let token = server.write_token();
 
     let start = Instant::now();
     let mut handles = Vec::new();
 
-    for i in 0..10 {
+    for i in 0..10u16 {
         let base_url = server.base_url.clone();
         let client = server.client.clone();
+        let token = token.clone();
         handles.push(tokio::spawn(async move {
             // Each task gets slightly different data by using a different seed
             let mut data = generate_test_data(1024 * 1024);
             // Make each file unique by setting the first few bytes
             data[0] = i as u8;
             data[1] = (i >> 8) as u8;
+            let artifacts = build_upload_artifacts(&data);
 
+            for (hash, xorb_data) in &artifacts.xorb_entries {
+                let resp = client
+                    .post(format!("{base_url}/v1/xorbs/default/{hash}"))
+                    .bearer_auth(&token)
+                    .body(xorb_data.clone())
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(resp.status(), 200);
+            }
             let resp = client
-                .post(format!("{base_url}/api/upload"))
-                .body(data)
+                .post(format!("{base_url}/v1/shards"))
+                .bearer_auth(&token)
+                .body(artifacts.shard_bytes.clone())
                 .send()
                 .await
                 .unwrap();
             assert_eq!(resp.status(), 200);
+            artifacts.file_hash
         }));
     }
 
+    let mut file_hashes = Vec::new();
     for handle in handles {
-        handle.await.unwrap();
+        file_hashes.push(handle.await.unwrap());
     }
 
     let elapsed = start.elapsed();
@@ -120,13 +136,19 @@ async fn test_perf_concurrent_uploads() {
         elapsed.as_millis()
     );
 
-    // Verify all files are indexed
-    let resp = server
-        .client
-        .get(format!("{}/api/stats", server.base_url))
-        .send()
-        .await
-        .unwrap();
-    let stats: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(stats["files_count"], 10);
+    // Verify every file is reconstructible
+    let read_token = server.read_token();
+    for file_hash in file_hashes {
+        let resp = server
+            .client
+            .get(format!(
+                "{}/v1/reconstructions/{file_hash}",
+                server.base_url
+            ))
+            .bearer_auth(&read_token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200);
+    }
 }
