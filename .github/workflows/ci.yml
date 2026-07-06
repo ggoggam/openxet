@@ -15,8 +15,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pre-commit:
-    name: pre-commit
+  ci:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -35,23 +34,8 @@ jobs:
           key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: cargo-${{ runner.os }}-
 
-      - run: mise run pre-commit
+      - name: Pre-commit
+        run: mise run pre-commit
 
-  test:
-    name: test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: jdx/mise-action@v3
-
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
-
-      - run: mise run test
+      - name: Test
+        run: mise run test
