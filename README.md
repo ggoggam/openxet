@@ -1,6 +1,6 @@
 # OpenXet
 
-A Rust implementation of a [Xet Protocol](https://huggingface.co/docs/xet/en/index)-compatible Content Addressable Storage (CAS) server with a web-based management UI. OpenXet provides content-addressed data storage with chunk-level deduplication, following the Xet Protocol Specification v1.0.0.
+A Rust implementation of a [Xet Protocol](https://huggingface.co/docs/xet/en/index)-compatible Content Addressable Storage (CAS) server, plus a reference client, a browser upload pipeline, and a web UI. OpenXet provides content-addressed data storage with chunk-level deduplication, following the Xet Protocol Specification v1.0.0. It speaks the same `/v1` wire protocol as HuggingFace's `xet-core` / `hf_xet`, so those clients work against it unmodified.
 
 ## Overview
 
@@ -69,7 +69,7 @@ cargo fmt --check  # Check formatting
 
 ## Architecture
 
-OpenXet is organized as a Cargo workspace with four crates:
+OpenXet is organized as a Cargo workspace with six crates:
 
 ```
 openxet/
@@ -77,16 +77,19 @@ openxet/
 │   ├── hashing/       # MerkleHash, Blake3 keyed hashing, aggregated merkle tree
 │   ├── chunking/      # Gearhash content-defined chunking (CDC)
 │   ├── cas_types/     # Xorb/Shard binary formats, chunk compression, reconstruction types
-│   └── server/        # HTTP server (axum) with auth, storage, and management API
+│   ├── server/        # HTTP server (axum) with auth and storage — the /v1 CAS protocol
+│   ├── client/        # openxet-client: reference CLI that uploads/downloads via /v1
+│   └── wasm/          # openxet-wasm: chunk/hash/pack pipeline compiled to WebAssembly
 ├── web/               # React frontend (TypeScript, Vite, TailwindCSS)
+├── examples/          # git / Gitea / hf_xet integration demos
 ├── docker/            # Dockerfile and Docker Compose
-└── spec/              # Protocol specification
+└── docs/              # Protocol specification
 ```
 
 ### Crate Dependency Graph
 
 ```
-server
+server / client / wasm
   ├── cas_types
   │     └── hashing
   ├── chunking
@@ -152,6 +155,35 @@ bun run build      # Production build (output: web/dist/)
 bun run lint       # ESLint
 ```
 
+## Reference Client
+
+`openxet-client` is a CLI that talks the `/v1` protocol directly, reusing the
+workspace's own hashing/chunking/cas-types crates so it is wire-compatible by
+construction. It performs the same chunk-level, cross-revision dedup as
+`xet-core`: query which chunks already exist, upload only the new ones, then
+register a shard referencing both.
+
+```bash
+# Upload (chunks, dedups, packs xorbs, registers a shard) — prints the file hash
+cargo run -p openxet-client -- put ./bigfile.bin --report
+
+# Download by file hash
+cargo run -p openxet-client -- get <file-hash> --out ./restored.bin
+
+# Config via flags or env: --url/OPENXET_URL, --secret/OPENXET_AUTH_SECRET
+```
+
+## Examples
+
+Runnable end-to-end demos live in [`examples/`](examples/README.md):
+
+- **`hf-xet-client/`** — the stock [`hf_xet`](https://pypi.org/project/hf-xet/)
+  Python client uploading/downloading against OpenXet unmodified (wire-compat proof)
+- **`gitea-integration/`** — self-hosted Gitea + OpenXet + RustFS, with a
+  git clean/smudge filter pushing large files through the CAS
+- **`git-integration/`** — OpenXet as a git large-file backend, demonstrating
+  chunk-level dedup across revisions
+
 ## Protocol Details
 
 OpenXet implements several non-trivial aspects of the Xet protocol:
@@ -161,7 +193,7 @@ OpenXet implements several non-trivial aspects of the Xet protocol:
 - **Chunk compression** -- Per-chunk LZ4 frame compression (not raw blocks)
 - **Shard format** -- Magic tag `"HFRepoMetaData\0"` + sentinel bytes; upload shards omit the footer
 
-See [`spec/SPECIFICATION.md`](spec/SPECIFICATION.md) for the full protocol specification.
+See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) for the full protocol specification.
 
 ## Development
 
@@ -171,14 +203,14 @@ The project uses [mise](https://mise.jdx.dev/) for task automation:
 
 ```bash
 mise run build           # Build all crates (debug)
-mise run build-release   # Build all crates (release)
+mise run build:release   # Build all crates (release)
 mise run test            # Run all tests
 mise run lint            # Run clippy
 mise run check           # Format check + clippy + tests
 mise run dev             # Build everything and run the server
-mise run fe-build        # Build frontend
-mise run jwt             # Generate a JWT token for testing
-mise run up              # Docker compose up
+mise run fe:build        # Build frontend (installs deps + compiles the wasm pipeline)
+mise run jwt             # Mint a write-scope JWT for the default dev secret
+mise run up              # Docker compose up (RustFS backend)
 mise run down            # Docker compose down
 ```
 
