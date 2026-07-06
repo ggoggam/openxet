@@ -75,7 +75,10 @@ fn test_data_path(name: &str) -> PathBuf {
         .and_then(|r| r.bytes())
         .unwrap_or_else(|e| panic!("failed to download {url}: {e}"));
 
-    let tmp = path.with_extension("download");
+    // ponytail: unique tmp per process — nextest runs each test in its own
+    // process, so the in-process DOWNLOAD_LOCK can't stop concurrent downloads
+    // racing on a shared tmp path. Unique name → rename never collides.
+    let tmp = path.with_extension(format!("download.{}", std::process::id()));
     fs::write(&tmp, &bytes).unwrap();
     fs::rename(&tmp, &path).unwrap();
     path
