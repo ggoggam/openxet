@@ -3,6 +3,22 @@
 Runnable examples showing how to use the OpenXet CAS server as the storage
 layer for version control over large binary datasets.
 
+## `gitea-integration/` — self-hosted Gitea with OpenXet as the Xet CAS
+
+```bash
+examples/gitea-integration/demo.sh
+```
+
+The full self-hosted stack via `docker/compose.gitea.yaml`: **Gitea** hosts the
+git repos, **OpenXet** stores the file bytes, and **RustFS** is OpenXet's
+S3-compatible storage backend. Gitea needs no plugins or configuration — it
+only ever sees ~118-byte pointer files, exactly like the HuggingFace Hub does
+on Xet-backed repos. The demo creates a Gitea user and repo over the API,
+pushes a 20 MiB file through the `git-openxet-protocol` clean/smudge filter
+(chunk-level dedup via the `/v1` Xet wire protocol), shows Gitea holds only the
+pointer, appends 1 MiB to prove the second push costs only ~1 MiB of CAS
+growth, and fresh-clones to verify the smudge filter restores the bytes.
+
 ## `git-integration/` — OpenXet as a git large-file backend
 
 ```bash

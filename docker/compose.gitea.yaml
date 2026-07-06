@@ -1,0 +1,35 @@
+# Gitea + OpenXet (Xet CAS) + RustFS (S3 storage backend).
+#
+# Gitea hosts the git repos and stores only tiny pointer files; the actual
+# file bytes live in OpenXet, which persists xorbs/shards to RustFS via the
+# S3 API. This mirrors the HuggingFace split: hub = names/history, Xet = bytes.
+#
+#   docker compose -f docker/compose.gitea.yaml up -d --build
+#
+# Then run the end-to-end demo: examples/gitea-integration/demo.sh
+include:
+  - compose.rustfs.yaml
+
+services:
+  gitea:
+    image: gitea/gitea:1.24
+    environment:
+      USER_UID: "1000"
+      USER_GID: "1000"
+      GITEA__database__DB_TYPE: sqlite3
+      GITEA__security__INSTALL_LOCK: "true"
+      GITEA__server__ROOT_URL: http://localhost:3000/
+      GITEA__service__DISABLE_REGISTRATION: "true"
+    ports:
+      - "3000:3000" # Web UI + git-over-HTTP
+    volumes:
+      - gitea-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  gitea-data:
