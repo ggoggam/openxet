@@ -8,6 +8,7 @@ bun = "latest"
 uv = "latest"
 prek = "latest"
 "github:rustwasm/wasm-pack" = "latest"
+"cargo:cargo-nextest" = "latest"
 
 [tasks."pre-commit"]
 description = "Run pre-commit checks via prek"
@@ -34,20 +35,32 @@ print(token)
 
 # ── Docker ─────────────────────────────────────────────────────────────────────
 
-[tasks.docker-up]
+[tasks."docker:up"]
 description = "Bring up docker compose services"
 run = "docker compose -f docker/compose.rustfs.yaml up -d --build --force-recreate --remove-orphans"
 alias = "up"
 
-[tasks.docker-down]
+[tasks."docker:down"]
 description = "bring down docker compose services"
 run = "docker compose -f docker/compose.rustfs.yaml down --remove-orphans"
 alias = "down"
 
-[tasks.docker-log]
+[tasks."docker:log"]
 description = "View docker logs"
 run = "docker compose -f docker/compose.rustfs.yaml logs --tail 100"
 alias = "log"
+
+[tasks."gitea:up"]
+description = "Bring up the gitea + openxet + rustfs stack"
+run = "docker compose -f docker/compose.gitea.yaml up -d --build --force-recreate --remove-orphans"
+
+[tasks."gitea:down"]
+description = "Bring down the gitea stack (add -- -v to drop volumes)"
+run = "docker compose -f docker/compose.gitea.yaml down --remove-orphans"
+
+[tasks."gitea:log"]
+description = "View gitea stack logs"
+run = "docker compose -f docker/compose.gitea.yaml logs --tail 100"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -65,16 +78,16 @@ sources = ["Cargo.toml", "crates/**/Cargo.toml", "crates/**/*.rs"]
 
 [tasks.test]
 description = "Run all tests"
-run = "cargo test"
+run = "cargo nextest run test"
 env = { RUST_BACKTRACE = "1" }
 
 [tasks."test:unit"]
 description = "Run unit tests only"
-run = "cargo test --lib"
+run = "cargo nextest run test --lib"
 
 [tasks."test:integration"]
 description = "Run integration tests only"
-run = "cargo test --test '*'"
+run = "cargo nextest run test --test '*'"
 env = { RUST_BACKTRACE = "1" }
 
 # ── Lint & Format ─────────────────────────────────────────────────────────────
