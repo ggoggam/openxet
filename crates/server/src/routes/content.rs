@@ -13,12 +13,25 @@ use crate::storage::{FileIndex, StorageBackend, validate_hash};
 use super::reconstruction::parse_range_header;
 
 /// GET /v1/content/{file_id} — stream decompressed file bytes with optional Range support.
+///
+/// `file_id` is a xet file hash, or `sha256:<hex>` to look up by the sha256
+/// recorded in the shard's file metadata (this is how Git LFS basic downloads
+/// address files, since the LFS oid is a sha256).
 pub async fn get_content(
     State(state): State<AppState>,
     _auth: RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
+    let file_id = if file_id.starts_with("sha256:") {
+        state
+            .file_index
+            .get(&file_id)
+            .await?
+            .ok_or_else(|| AppError::NotFound(format!("file not found: {file_id}")))?
+    } else {
+        file_id
+    };
     validate_hash(&file_id)?;
 
     // Look up file → shard

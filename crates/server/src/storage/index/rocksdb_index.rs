@@ -70,6 +70,10 @@ impl ChunkIndex for RocksDbChunkIndex {
 }
 
 /// RocksDB-backed file index: `file_hash → shard_hash` (plain UTF-8 value).
+///
+/// Also stores `sha256:<hex> → file_hash` aliases (written at shard ingest
+/// from the shard's `FileMetadataExt`) so Git-LFS-style lookups by sha256 can
+/// resolve to a xet file hash.
 pub struct RocksDbFileIndex {
     db: Arc<DB>,
 }
@@ -85,7 +89,7 @@ impl RocksDbFileIndex {
 
 impl FileIndex for RocksDbFileIndex {
     async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
-        validate_hash(file_hash)?;
+        validate_hash(file_hash.strip_prefix("sha256:").unwrap_or(file_hash))?;
         match self.db.get(file_hash.as_bytes()).map_err(rocks_err)? {
             Some(data) => Ok(Some(String::from_utf8_lossy(&data).into_owned())),
             None => Ok(None),
@@ -93,7 +97,7 @@ impl FileIndex for RocksDbFileIndex {
     }
 
     async fn put(&self, file_hash: &str, shard_hash: &str) -> Result<(), StorageError> {
-        validate_hash(file_hash)?;
+        validate_hash(file_hash.strip_prefix("sha256:").unwrap_or(file_hash))?;
         validate_hash(shard_hash)?;
         self.db
             .put(file_hash.as_bytes(), shard_hash.as_bytes())
@@ -191,5 +195,18 @@ mod tests {
 
         assert!(index.put("bad", HASH_A).await.is_err());
         assert!(index.put(HASH_A, "bad").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_sha256_alias_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = RocksDbFileIndex::new(dir.path()).unwrap();
+
+        let key = format!("sha256:{HASH_A}");
+        index.put(&key, HASH_B).await.unwrap();
+        assert_eq!(index.get(&key).await.unwrap().as_deref(), Some(HASH_B));
+
+        assert!(index.put("sha256:bad", HASH_B).await.is_err());
+        assert!(index.get("sha256:bad").await.is_err());
     }
 }

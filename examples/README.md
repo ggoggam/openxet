@@ -37,6 +37,30 @@ official client leaves to the server operator is token *issuance* — on
 huggingface.co that's the Hub's `xet-{read,write}-token` endpoint — so the demo
 mints an OpenXet JWT locally with PyJWT and hands it to `hf_xet.XetSession`.
 
+## `git-xet-integration/` — HuggingFace's official `git-xet` against OpenXet
+
+```bash
+examples/git-xet-integration/demo.sh   # needs git-lfs + git-xet (brew install git-xet)
+```
+
+The production-grade git integration, using HF's real tooling end to end:
+files are tracked by **stock git-lfs** (standard LFS pointers in git history),
+and on push the LFS server negotiates the `xet` custom transfer agent, so
+[`git-xet`](https://github.com/huggingface/xet-core/tree/main/git_xet) chunks,
+dedups and uploads the bytes to OpenXet over the Xet wire protocol — exactly
+how a Xet-enabled push to huggingface.co works. Downloads use the standard LFS
+`basic` transfer (git-xet is upload-only by design), served by OpenXet's
+`GET /v1/content/sha256:<oid>` route — the server indexes the sha256 each
+git-xet shard carries in its file metadata, playing the role of HF's LFS
+bridge.
+
+`lfs_server.py` (~150 lines, Python stdlib only) stands in for the HF Hub: it
+serves git smart-HTTP for a bare repo and the LFS batch API, minting OpenXet
+JWTs and handing them to git-xet via the same `X-Xet-Cas-Url` /
+`X-Xet-Access-Token` action headers the Hub uses. The demo pushes an 8 MiB
+file, checks git only stored a pointer and the CAS got the xorbs, then
+fresh-clones and verifies the bytes byte-for-byte.
+
 ## `git-integration/` — OpenXet as a git large-file backend
 
 ```bash

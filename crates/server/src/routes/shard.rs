@@ -138,6 +138,18 @@ pub async fn post_shard(
             .file_index
             .put(&file_hash_hex, &shard_hash_hex)
             .await?;
+
+        // If the writer attached a sha256 (e.g. git-xet uses the Git LFS oid),
+        // alias it to the file hash so clients can fetch by sha256. xet-core
+        // stores the digest with MerkleHash's u64-LE byte order, so hex it the
+        // same way to recover the original sha256 hex.
+        if let Some(ext) = &file_block.metadata_ext {
+            let sha_hex = MerkleHash::from_bytes(ext.sha256).to_hex();
+            state
+                .file_index
+                .put(&format!("sha256:{sha_hex}"), &file_hash_hex)
+                .await?;
+        }
     }
 
     // Index chunk hashes from CAS info section in one batched write
