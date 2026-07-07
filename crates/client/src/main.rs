@@ -118,6 +118,23 @@ struct Placement {
     index_in_xorb: u32,
 }
 
+/// Map `f` over `items` using all cores; order is preserved.
+fn par_map<T: Sync, R: Send>(items: &[T], f: impl Fn(&T) -> R + Sync) -> Vec<R> {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let per = items.len().div_ceil(threads).max(1);
+    let f = &f;
+    std::thread::scope(|s| {
+        let handles: Vec<_> = items
+            .chunks(per)
+            .map(|part| s.spawn(move || part.iter().map(f).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().expect("worker thread panicked"))
+            .collect()
+    })
+}
+
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
@@ -135,6 +152,16 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
     }
     let token = cli.token.as_deref();
     let http = reqwest::blocking::Client::new();
+    let mut mark = std::time::Instant::now();
+    let phase = |name: &str, mark: &mut std::time::Instant| {
+        if stats {
+            eprintln!(
+                "openxet-client: {name}: {:.3}s",
+                mark.elapsed().as_secs_f64()
+            );
+        }
+        *mark = std::time::Instant::now();
+    };
 
     // 1. Chunk + hash.
     let chunk_infos = chunk_data(&data);
@@ -142,8 +169,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
         .iter()
         .map(|ci| &data[ci.offset..ci.offset + ci.length])
         .collect();
-    let chunk_hashes: Vec<MerkleHash> =
-        chunk_slices.iter().map(|d| compute_chunk_hash(d)).collect();
+    let chunk_hashes: Vec<MerkleHash> = par_map(&chunk_slices, |d| compute_chunk_hash(d));
     let sizes: Vec<usize> = chunk_slices.iter().map(|d| d.len()).collect();
 
     let hashes_and_sizes: Vec<(MerkleHash, usize)> = chunk_hashes
@@ -152,15 +178,21 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
         .zip(sizes.iter().copied())
         .collect();
     let file_hash = compute_file_hash(&hashes_and_sizes);
+    phase("chunk+hash", &mut mark);
 
     // 2. Dedup query pass: resolve as many chunks as possible to existing xorbs.
     let n = chunk_hashes.len();
     let mut placement: Vec<Option<Placement>> = vec![None; n];
     let mut queries = 0usize;
 
+    // ponytail: query 1 chunk in 32 (~2 MiB of data) instead of every chunk —
+    // per-chunk queries cost O(n) HTTP round-trips; xet-core samples similarly.
+    // Misses fall back to uploading the chunk, so this only trades dedup ratio.
+    const DEDUP_QUERY_STRIDE: usize = 32;
+
     let mut i = 0;
     while i < n {
-        if placement[i].is_some() {
+        if placement[i].is_some() || i % DEDUP_QUERY_STRIDE != 0 {
             i += 1;
             continue;
         }
@@ -216,47 +248,81 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
         i += 1;
     }
 
+    phase("dedup-queries", &mut mark);
+
     // 3. Pack the still-unresolved (new) chunks into xorbs and upload them.
     //    `built` records, for each xorb we create this run, its hash and the
     //    global chunk indices it holds in order — used to emit CAS info below.
-    let new_chunk_count = placement.iter().filter(|p| p.is_none()).count();
-    let mut built: Vec<(String, Vec<usize>)> = Vec::new();
-    {
-        // Greedy fill by serialized size, like the server's pipeline.
-        let mut group: Vec<usize> = Vec::new(); // global chunk indices
-        let mut group_bytes = 0usize;
+    let new_indices: Vec<usize> = (0..n).filter(|&i| placement[i].is_none()).collect();
+    let new_chunk_count = new_indices.len();
 
-        for idx in 0..n {
-            if placement[idx].is_some() {
-                continue;
-            }
-            let serialized = serialize_single_chunk(chunk_slices[idx], CompressionType::Lz4)?;
-            if !group.is_empty() && group_bytes + serialized.len() > XORB_SOFT_LIMIT {
-                let hash = upload_xorb(&http, &cli.url, token, &chunk_slices, &group)?;
-                for (local_idx, &gi) in group.iter().enumerate() {
-                    placement[gi] = Some(Placement {
-                        xorb_hash: hash.clone(),
-                        index_in_xorb: local_idx as u32,
-                    });
-                }
-                built.push((hash, std::mem::take(&mut group)));
-                group_bytes = 0;
-            }
-            group_bytes += serialized.len();
-            group.push(idx);
+    // Compress each new chunk exactly once, in parallel.
+    let mut compressed: Vec<Vec<u8>> = par_map(&new_indices, |&gi| {
+        serialize_single_chunk(chunk_slices[gi], CompressionType::Lz4)
+            .expect("LZ4 compression into memory cannot fail")
+    });
+
+    // Greedy fill by serialized size, like the server's pipeline. Groups hold
+    // positions into `new_indices`/`compressed`.
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    let mut group: Vec<usize> = Vec::new();
+    let mut group_bytes = 0usize;
+    for (p, bytes) in compressed.iter().enumerate() {
+        if !group.is_empty() && group_bytes + bytes.len() > XORB_SOFT_LIMIT {
+            groups.push(std::mem::take(&mut group));
+            group_bytes = 0;
         }
-        if !group.is_empty() {
-            let hash = upload_xorb(&http, &cli.url, token, &chunk_slices, &group)?;
-            for (local_idx, &gi) in group.iter().enumerate() {
-                placement[gi] = Some(Placement {
-                    xorb_hash: hash.clone(),
-                    index_in_xorb: local_idx as u32,
-                });
+        group_bytes += bytes.len();
+        group.push(p);
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+
+    // Assemble xorbs (hash from the already-computed chunk hashes) and upload
+    // them concurrently.
+    let xorbs: Vec<(String, Vec<u8>, Vec<usize>)> = groups
+        .into_iter()
+        .map(|group| {
+            let mut body = Vec::with_capacity(group.iter().map(|&p| compressed[p].len()).sum());
+            let mut hs = Vec::with_capacity(group.len());
+            let mut globals = Vec::with_capacity(group.len());
+            for &p in &group {
+                body.append(&mut compressed[p]);
+                let gi = new_indices[p];
+                hs.push((chunk_hashes[gi], sizes[gi]));
+                globals.push(gi);
             }
-            built.push((hash, group));
+            (compute_xorb_hash(&hs).to_hex(), body, globals)
+        })
+        .collect();
+
+    const UPLOAD_CONCURRENCY: usize = 8;
+    for wave in xorbs.chunks(UPLOAD_CONCURRENCY) {
+        std::thread::scope(|s| -> Result<()> {
+            let handles: Vec<_> = wave
+                .iter()
+                .map(|(hash, body, _)| s.spawn(|| upload_xorb(&http, &cli.url, token, hash, body)))
+                .collect();
+            for h in handles {
+                h.join().expect("upload thread panicked")?;
+            }
+            Ok(())
+        })?;
+    }
+
+    let mut built: Vec<(String, Vec<usize>)> = Vec::new();
+    for (hash, _, globals) in &xorbs {
+        for (local_idx, &gi) in globals.iter().enumerate() {
+            placement[gi] = Some(Placement {
+                xorb_hash: hash.clone(),
+                index_in_xorb: local_idx as u32,
+            });
         }
+        built.push((hash.clone(), globals.clone()));
     }
     let new_xorb_count = built.len();
+    phase("pack+upload-xorbs", &mut mark);
 
     // 4. Build the shard: coalesce consecutive chunks sharing a xorb + adjacent
     //    indices into reconstruction terms; add a verification entry per term;
@@ -357,6 +423,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
         let text = resp.text().unwrap_or_default();
         bail!("shard upload failed ({status}): {text}");
     }
+    phase("shard-upload", &mut mark);
 
     if stats {
         eprintln!(
@@ -373,34 +440,25 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
     Ok(())
 }
 
-/// Serialize `group`'s chunks into a xorb, POST it, and return its hash hex.
+/// POST an already-serialized xorb body under `xorb_hash`.
 fn upload_xorb(
     http: &reqwest::blocking::Client,
     base_url: &str,
     token: Option<&str>,
-    chunk_slices: &[&[u8]],
-    group: &[usize],
-) -> Result<String> {
-    let mut xorb_bytes = Vec::new();
-    let mut hs: Vec<(MerkleHash, usize)> = Vec::with_capacity(group.len());
-    for &gi in group {
-        let slice = chunk_slices[gi];
-        xorb_bytes.extend_from_slice(&serialize_single_chunk(slice, CompressionType::Lz4)?);
-        hs.push((compute_chunk_hash(slice), slice.len()));
-    }
-    let xorb_hash = compute_xorb_hash(&hs).to_hex();
-
+    xorb_hash: &str,
+    body: &[u8],
+) -> Result<()> {
     let resp = with_token(
         http.post(format!("{base_url}/v1/xorbs/default/{xorb_hash}")),
         token,
     )
     .header("content-type", "application/octet-stream")
-    .body(xorb_bytes)
+    .body(body.to_vec())
     .send()?;
     if !resp.status().is_success() {
         bail!("xorb upload failed ({}) for {xorb_hash}", resp.status());
     }
-    Ok(xorb_hash)
+    Ok(())
 }
 
 // ─── download ──────────────────────────────────────────────────────────────
