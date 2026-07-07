@@ -134,9 +134,9 @@ speaks only the Xet wire protocol, like any other client:
 - **Files** -- a local catalog (browser localStorage) of files uploaded from
   this browser, plus "open by hash" for anything else; the CAS itself is
   content-addressed and has no listing endpoint by design
-- **File detail** -- reconstruction terms from `/v1/reconstructions`, content
-  preview/download via `/v1/content` (text, images, PDF, hex dump, and
-  CSV/Parquet querying in-browser with DuckDB WASM)
+- **File detail** -- reconstruction terms from `/v1/reconstructions`; content
+  preview/download reassembles the file in-browser from ranged xorb fetches
+  (text, images, PDF, hex dump, and CSV/Parquet querying with DuckDB WASM)
 - **Auth** -- paste the server's `OPENXET_AUTH_SECRET` in the header field;
   the UI mints short-lived JWTs locally via WebCrypto (there is no token
   endpoint — on huggingface.co that's the Hub's job)

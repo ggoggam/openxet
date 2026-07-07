@@ -1,0 +1,80 @@
+[project]
+name = "openxet-fsspec"
+version = "0.1.0"
+description = "fsspec filesystem for OpenXet: Git forge (GitHub/Gitea) namespace + Xet CAS bytes"
+requires-python = ">=3.9"
+license = "Apache-2.0"
+dependencies = [
+    "fsspec>=2024.2.0",
+    "aiohttp>=3.9",
+    "anyio>=4",
+    "hf-xet>=1.1.10",
+    "lz4>=4",
+    "PyJWT>=2.8",
+]
+
+[project.entry-points."fsspec.specs"]
+xet = "openxet_fsspec:XetFileSystem"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openxet_fsspec"]
+
+[tool.hatch.build.targets.sdist]
+exclude = ["demo.py"]
+
+[tool.ruff]
+line-length = 88
+indent-width = 4
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "PLR0913",  # too many arguments -- fsspec constructors require it
+    "S310",     # URL open -- health-check urlopen in test fixtures
+    "COM812",   # trailing comma -- conflicts with the formatter (ruff warns)
+    "ANN001",   # arg annotations -- signatures are dictated by fsspec base classes
+    "ANN003",   # **kwargs annotations -- passthrough to fsspec, always **kwargs: Any
+    "ANN202",   # private return annotations -- internal helpers, not API surface
+    "ANN204",   # dunder return annotations -- `__init__ -> None` is noise
+    "ARG002",   # unused method args -- mandated by fsspec base-class signatures
+    "FBT001",   # bool positional -- fsspec `detail=`/`final=` override contract
+    "FBT002",
+    "D100",     # module docstring -- internal modules are self-evident
+    "D102",     # method docstring -- documented selectively, not exhaustively
+    "D104",     # package docstring
+    "D107",     # __init__ docstring
+    "TRY003",   # long exception messages -- not worth a custom exception class
+    "EM101",    # string literal in raise -- same
+    "PLR2004",  # magic value in comparison -- e.g. HTTP 404
+]
+pydocstyle = { convention = "google" }
+
+[tool.ruff.lint.per-file-ignores]
+"tests/test_*.py" = [
+    "S101",
+    "D103",
+    "SLF001",
+    "S608",     # SQL injection -- test benchmarks use controlled f-strings
+]
+"tests/conftest.py" = [
+    "SLF001",
+]
+# demo.py is a runnable end-to-end self-check script, not library code:
+# asserts, prints, hardcoded compose-stack creds, and ranged requests are the point.
+"demo.py" = [
+    "S101", "S105", "S113", "T201", "PT018", "EXE001",
+    "PTH118", "PTH123", "SLF001", "D103", "ANN201",
+]
+"src/openxet_fsspec/spec.py" = [
+    "SLF001",   # XetFile drives the filesystem's own private coroutines
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: requires a reachable Lore server (LORE_TEST_REPOSITORY_URL)",
+]

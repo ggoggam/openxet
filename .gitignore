@@ -26,3 +26,9 @@ Thumbs.db
 
 # Data
 .data/
+
+# Python
+.venv/
+uv.lock
+__pycache__/
+dist/

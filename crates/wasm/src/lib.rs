@@ -24,7 +24,9 @@ use openxet_cas_types::shard::{
     FileDataSequenceHeader, FileInfoBlock, FileVerificationEntry, MDB_FILE_FLAG_WITH_VERIFICATION,
     Shard, ShardHeader,
 };
-use openxet_cas_types::xorb::{XORB_SOFT_LIMIT, compute_xorb_hash, serialize_single_chunk};
+use openxet_cas_types::xorb::{
+    XORB_SOFT_LIMIT, compute_xorb_hash, deserialize_xorb_range, serialize_single_chunk,
+};
 use openxet_chunking::chunk_data;
 use openxet_hashing::{
     MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
@@ -397,6 +399,17 @@ fn build_plan(
         xorbs,
         shard_bytes,
     })
+}
+
+/// Decode a fetched xorb byte range (a sequence of chunk frames, as returned
+/// by a reconstruction `fetch_info` URL + `url_range`) into raw file bytes.
+/// `start`/`end` are chunk indices *relative to the fetched slice* — i.e.
+/// `term.range` shifted by the fetch info's `range.start`.
+#[wasm_bindgen]
+pub fn decode_chunks(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, JsError> {
+    let chunks = deserialize_xorb_range(data, start, end)
+        .map_err(|e| JsError::new(&format!("decoding chunks: {e}")))?;
+    Ok(chunks.into_iter().flat_map(|c| c.data).collect())
 }
 
 /// One-shot plan without global dedup (kept for tests and non-dedup callers).

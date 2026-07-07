@@ -44,13 +44,16 @@ interface QueryResult {
 
 interface DuckDBQueryOptions {
   format: TableFormat;
-  /** In-memory file bytes. Required for CSV/TSV; optional for parquet. */
-  bytes?: Uint8Array;
-  /** URL for HTTP Range-based streaming. Used for parquet when bytes is not provided. */
-  contentUrl?: string;
+  /** In-memory file bytes. */
+  bytes: Uint8Array;
 }
 
-function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
+// Unique per registration: the singleton DuckDB instance caches state by
+// filename, so reusing "data.parquet" across files reads new bytes with the
+// previous file's metadata (Snappy "uncompressed size mismatch").
+let fileSeq = 0;
+
+function useDuckDBQuery({ format, bytes }: DuckDBQueryOptions) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
@@ -61,6 +64,7 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
 
   useEffect(() => {
     let cancelled = false;
+    const filename = `data-${++fileSeq}.${format}`;
 
     (async () => {
       try {
@@ -68,31 +72,14 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
         const conn = await db.connect();
         connRef.current = conn;
 
+        await db.registerFileBuffer(filename, bytes);
+
         let viewSql: string;
-
-        if (format === "parquet" && contentUrl && !bytes) {
-          // Stream parquet via HTTP Range requests — no full download needed.
-          const filename = "data.parquet";
-          await db.registerFileURL(
-            filename,
-            contentUrl,
-            4, // DuckDBDataProtocol.HTTP
-            false,
-          );
+        if (format === "parquet") {
           viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('${filename}')`;
-        } else if (bytes) {
-          const filename =
-            format === "parquet" ? "data.parquet" : `data.${format}`;
-          await db.registerFileBuffer(filename, bytes);
-
-          if (format === "parquet") {
-            viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_parquet('${filename}')`;
-          } else {
-            const delim = format === "tsv" ? "\\t" : ",";
-            viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv('${filename}', delim='${delim}', header=true, auto_detect=true)`;
-          }
         } else {
-          throw new Error("Either bytes or contentUrl must be provided");
+          const delim = format === "tsv" ? "\\t" : ",";
+          viewSql = `CREATE OR REPLACE VIEW data AS SELECT * FROM read_csv('${filename}', delim='${delim}', header=true, auto_detect=true)`;
         }
 
         await conn.query(viewSql);
@@ -114,8 +101,9 @@ function useDuckDBQuery({ format, bytes, contentUrl }: DuckDBQueryOptions) {
       connRef.current?.close();
       connRef.current = null;
       readyRef.current = false;
+      getDuckDB().then((db) => db.dropFile(filename)).catch(() => {});
     };
-  }, [bytes, format, contentUrl]);
+  }, [bytes, format]);
 
   const runQuery = useCallback(async (querySql: string) => {
     const conn = connRef.current;
@@ -419,16 +407,13 @@ function QueryResults({ result }: { result: QueryResult }) {
 export default function TablePreview({
   bytes,
   format,
-  contentUrl,
 }: {
-  bytes?: Uint8Array;
+  bytes: Uint8Array;
   format: TableFormat;
-  contentUrl?: string;
 }) {
   const { result, error, loading, runQuery } = useDuckDBQuery({
     format,
     bytes,
-    contentUrl,
   });
 
   return (
