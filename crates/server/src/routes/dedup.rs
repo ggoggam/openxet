@@ -81,7 +81,6 @@ pub async fn get_dedup(
         return Err(AppError::NotFound(format!("chunk not found: {hash}")));
     }
 
-    // ponytail: responds with only the xorb(s) containing the queried chunk;
     // the spec permits adding likely-related xorbs to raise dedup hit rates —
     // add if cross-file dedup misses show up in practice.
     let mut xorb_map: HashMap<String, Vec<u32>> = HashMap::new();
