@@ -10,6 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use openxet_cas_types::chunk::{ChunkHeader, CompressionType};
 use openxet_cas_types::shard::Shard;
 use openxet_cas_types::xorb;
 use openxet_chunking::chunk_data;
@@ -294,6 +295,23 @@ fn test_xorb_deserialization() {
             i
         );
     }
+
+    // The interop claim "our frame-based LZ4 matches xet-core's" rests on this
+    // xet-core-produced xorb actually containing LZ4 chunks — pin that here.
+    let mut has_lz4 = false;
+    let mut pos = 0;
+    while pos + ChunkHeader::SIZE <= xorb_data.len() {
+        let header_bytes: [u8; 8] = xorb_data[pos..pos + ChunkHeader::SIZE].try_into().unwrap();
+        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
+            break; // CasObjectInfoV1 footer
+        };
+        has_lz4 |= header.compression_type == CompressionType::Lz4;
+        pos += ChunkHeader::SIZE + header.compressed_size as usize;
+    }
+    assert!(
+        has_lz4,
+        "reference xorb contains no LZ4 chunks; LZ4 interop is not exercised"
+    );
 }
 
 // ─── Shard Deserialization Tests ─────────────────────────────────────────────

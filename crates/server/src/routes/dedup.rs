@@ -81,7 +81,8 @@ pub async fn get_dedup(
         return Err(AppError::NotFound(format!("chunk not found: {hash}")));
     }
 
-    // Group by xorb_hash
+    // the spec permits adding likely-related xorbs to raise dedup hit rates —
+    // add if cross-file dedup misses show up in practice.
     let mut xorb_map: HashMap<String, Vec<u32>> = HashMap::new();
     for loc in &locations {
         xorb_map
