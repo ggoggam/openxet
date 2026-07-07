@@ -85,7 +85,7 @@ Query global chunk deduplication.
 
 **Implementation notes:**
 - Look up chunk hash in the global chunk index
-- If found, build a shard response containing the CAS info blocks for xorbs that contain this chunk (and nearby chunks)
+- If found, build a shard response containing the CAS info blocks for the xorbs that contain this chunk. (The official spec also permits including additional likely-related xorbs to raise dedup hit rates; openxet deliberately returns only the containing xorbs.)
 - Generate a random HMAC key, HMAC-protect all chunk hashes in the response, include key in footer
 - Set `shard_key_expiry` to current time + configurable TTL (e.g., 7 days)
 
@@ -494,5 +494,5 @@ These are the critical invariants from the spec that the server MUST enforce:
 6. **All uploads are idempotent** — re-uploading existing xorb/shard returns success
 7. **Hash string encoding uses LE octet reversal** — not direct byte-to-hex
 8. **Chunk boundaries are deterministic** — same input → same boundaries everywhere
-9. **FileMetadataExt is REQUIRED per file in shard uploads** (contains SHA256)
+9. **FileMetadataExt (SHA256) is OPTIONAL** — the official spec requires it only for git-LFS-backed Hugging Face Hub repos; when omitted, the `0x40000000` flag MUST NOT be set. openxet clients omit it and the server does not require it
 10. **FileVerificationEntry is REQUIRED for all files in shard uploads**
