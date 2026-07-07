@@ -26,6 +26,15 @@ pub struct XorbChunk {
     pub chunk_hash: String,
     /// Uncompressed size of the chunk in bytes.
     pub unpacked_size: u32,
+    /// Compressed on-disk size of the chunk's data in bytes, excluding the
+    /// 8-byte [`ChunkHeader`](openxet_cas_types::chunk::ChunkHeader). Together
+    /// with the header size this lets reconstruction compute a chunk's byte
+    /// range within the serialized xorb without re-downloading it.
+    ///
+    /// Defaults to `0` for layouts written before this field existed; a `0`
+    /// signals "unknown", and reconstruction falls back to reading the xorb.
+    #[serde(default)]
+    pub compressed_size: u32,
 }
 
 /// The recorded layout of a xorb: its on-disk size and its chunks in order.

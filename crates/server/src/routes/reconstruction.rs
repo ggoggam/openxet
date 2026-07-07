@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
+use futures::stream::{self, StreamExt, TryStreamExt};
 
 use openxet_cas_types::chunk::ChunkHeader;
 use openxet_cas_types::reconstruction::{
@@ -15,7 +16,14 @@ use openxet_cas_types::shard::Shard;
 use crate::auth::RequireRead;
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::storage::{FileIndex, StorageBackend, validate_hash};
+use crate::storage::index::XorbLayout;
+use crate::storage::{ChunkIndex, FileIndex, StorageBackend, validate_hash};
+
+/// Max concurrent per-xorb layout lookups + presigns when building fetch info.
+/// Each unique xorb needs an independent index read (and, for legacy entries, a
+/// possible object-store fetch) plus a presign; running them serially made a
+/// file that spans many xorbs pay those round-trips back to back.
+const RECON_FETCH_CONCURRENCY: usize = 16;
 
 /// Parse an HTTP Range header of the form "bytes=start-end" (inclusive end).
 fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppError> {
@@ -69,6 +77,30 @@ fn compute_chunk_byte_offsets(xorb_data: &[u8]) -> Vec<(u64, u64)> {
     }
 
     offsets
+}
+
+/// Compute the same `(offset_start, offset_end)` byte positions as
+/// [`compute_chunk_byte_offsets`], but from a recorded [`XorbLayout`] instead of
+/// the xorb bytes — no object-store fetch. Each chunk occupies its 8-byte header
+/// plus its compressed data, so offsets are the running sum of those spans.
+///
+/// Returns `None` when the layout predates recorded compressed sizes (any chunk
+/// still has the `0` sentinel), so the caller falls back to reading the xorb.
+fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>> {
+    if layout.chunks.iter().any(|c| c.compressed_size == 0) {
+        return None;
+    }
+
+    let mut offsets = Vec::with_capacity(layout.chunks.len());
+    let mut pos = 0u64;
+    for chunk in &layout.chunks {
+        let chunk_start = pos;
+        let chunk_end = pos + ChunkHeader::SIZE as u64 + chunk.compressed_size as u64;
+        offsets.push((chunk_start, chunk_end));
+        pos = chunk_end;
+    }
+
+    Some(offsets)
 }
 
 pub async fn get_reconstruction(
@@ -172,46 +204,75 @@ pub async fn get_reconstruction(
 
     let url_ttl = Duration::from_secs(state.config.auth.shard_key_ttl_seconds);
 
-    let mut fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>> = HashMap::new();
+    // De-duplicate to the first term referencing each xorb — its chunk range is
+    // what that xorb's fetch info covers — then build every entry concurrently.
+    let mut seen = HashSet::new();
+    let unique_terms: Vec<CASReconstructionTerm> = terms
+        .iter()
+        .filter(|t| seen.insert(t.hash.clone()))
+        .cloned()
+        .collect();
 
-    for term in &terms {
-        if fetch_info.contains_key(&term.hash) {
-            continue;
-        }
+    let fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>> =
+        stream::iter(unique_terms)
+            .map(|term| {
+                let state = &state;
+                let base_url = &base_url;
+                async move {
+                    // Prefer the recorded layout: byte offsets come from index
+                    // metadata with no object-store fetch. Only fall back to
+                    // downloading the whole xorb for entries stored before
+                    // layouts recorded compressed sizes.
+                    let chunk_offsets =
+                        match state.chunk_index.get_xorb_layout(&term.hash).await? {
+                            Some(layout) => match chunk_byte_offsets_from_layout(&layout) {
+                                Some(offsets) => offsets,
+                                None => compute_chunk_byte_offsets(
+                                    &state.storage.get_xorb(&term.hash).await?,
+                                ),
+                            },
+                            None => compute_chunk_byte_offsets(
+                                &state.storage.get_xorb(&term.hash).await?,
+                            ),
+                        };
 
-        let xorb_data = state.storage.get_xorb(&term.hash).await?;
-        let chunk_offsets = compute_chunk_byte_offsets(&xorb_data);
+                    // Build fetch info covering the chunks this term needs
+                    let start_idx = term.range.start;
+                    let end_idx = term.range.end.min(chunk_offsets.len());
 
-        // Build fetch info covering the chunks this term needs
-        let start_idx = term.range.start;
-        let end_idx = term.range.end.min(chunk_offsets.len());
+                    if start_idx >= chunk_offsets.len() {
+                        return Ok::<_, AppError>(None);
+                    }
 
-        if start_idx < chunk_offsets.len() {
-            let byte_start = chunk_offsets[start_idx].0;
-            let byte_end = chunk_offsets[end_idx - 1].1 - 1; // inclusive for HTTP Range
+                    let byte_start = chunk_offsets[start_idx].0;
+                    let byte_end = chunk_offsets[end_idx - 1].1 - 1; // inclusive for HTTP Range
 
-            let url = match state
-                .storage
-                .presigned_xorb_url(&term.hash, url_ttl)
-                .await?
-            {
-                Some(presigned) => presigned,
-                None => format!("{base_url}/v1/xorbs/default/{}", term.hash),
-            };
+                    let url = match state
+                        .storage
+                        .presigned_xorb_url(&term.hash, url_ttl)
+                        .await?
+                    {
+                        Some(presigned) => presigned,
+                        None => format!("{base_url}/v1/xorbs/default/{}", term.hash),
+                    };
 
-            fetch_info.insert(
-                term.hash.clone(),
-                vec![CASReconstructionFetchInfo {
-                    range: term.range,
-                    url,
-                    url_range: ByteRange {
-                        start: byte_start,
-                        end: byte_end,
-                    },
-                }],
-            );
-        }
-    }
+                    Ok(Some((
+                        term.hash.clone(),
+                        vec![CASReconstructionFetchInfo {
+                            range: term.range,
+                            url,
+                            url_range: ByteRange {
+                                start: byte_start,
+                                end: byte_end,
+                            },
+                        }],
+                    )))
+                }
+            })
+            .buffer_unordered(RECON_FETCH_CONCURRENCY)
+            .try_filter_map(|entry| async move { Ok(entry) })
+            .try_collect()
+            .await?;
 
     Ok(Json(QueryReconstructionResponse {
         offset_into_first_range,

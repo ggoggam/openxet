@@ -5,6 +5,7 @@ use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde::Serialize;
 
+use openxet_cas_types::chunk::ChunkHeader;
 use openxet_cas_types::xorb::{MAX_XORB_SIZE, compute_xorb_hash, deserialize_xorb};
 use openxet_hashing::{MerkleHash, compute_chunk_hash};
 
@@ -17,6 +18,26 @@ use crate::storage::{ChunkIndex, StorageBackend, validate_hash};
 #[derive(Debug, Serialize)]
 pub struct XorbUploadResponse {
     pub was_inserted: bool,
+}
+
+/// Compressed data size (excluding the 8-byte header) of each chunk, in xorb
+/// order. Parses only chunk headers — no decompression. `body` is already
+/// validated by [`deserialize_xorb`] before this is called, so the walk mirrors
+/// that framing and never runs past the end.
+fn chunk_compressed_sizes(xorb_data: &[u8]) -> Vec<u32> {
+    let mut sizes = Vec::new();
+    let mut pos = 0usize;
+
+    while pos + ChunkHeader::SIZE <= xorb_data.len() {
+        let header_bytes: [u8; 8] = xorb_data[pos..pos + 8].try_into().unwrap();
+        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
+            break;
+        };
+        sizes.push(header.compressed_size);
+        pos += ChunkHeader::SIZE + header.compressed_size as usize;
+    }
+
+    sizes
 }
 
 pub async fn post_xorb(
@@ -61,8 +82,12 @@ pub async fn post_xorb(
         )));
     }
 
-    // On-disk size must be read before `body` is moved into storage.
+    // On-disk size and per-chunk compressed sizes must be read before `body` is
+    // moved into storage. Compressed sizes come from a header-only walk (no
+    // decompression) and feed the layout so reconstruction can compute byte
+    // ranges without re-downloading the xorb.
     let num_bytes_on_disk = body.len() as u32;
+    let compressed_sizes = chunk_compressed_sizes(&body);
 
     // Store the xorb
     state.storage.put_xorb(&hash, body).await?;
@@ -89,9 +114,11 @@ pub async fn post_xorb(
         num_bytes_on_disk,
         chunks: chunk_hashes_and_sizes
             .iter()
-            .map(|(chunk_hash, size)| XorbChunk {
+            .zip(&compressed_sizes)
+            .map(|((chunk_hash, size), compressed_size)| XorbChunk {
                 chunk_hash: chunk_hash.to_hex(),
                 unpacked_size: *size as u32,
+                compressed_size: *compressed_size,
             })
             .collect(),
     };

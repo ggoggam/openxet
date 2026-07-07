@@ -27,6 +27,7 @@ Thumbs.db
 # Data
 .data/
 .rustfs/
+.pgdata/
 
 # Python
 .venv/
