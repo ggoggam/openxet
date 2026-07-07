@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use openxet_server::auth::JwksCache;
-use openxet_server::config::{AppConfig, Cli, DEFAULT_AUTH_SECRET};
+use openxet_server::config::{AppConfig, Cli};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
 use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
@@ -28,11 +28,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let config = AppConfig::load(&cli)?;
 
-    if config.auth.secret.is_empty() || config.auth.secret == DEFAULT_AUTH_SECRET {
+    if !config.auth.enabled {
         tracing::warn!(
-            "OPENXET_AUTH_SECRET is unset or the built-in default — all JWTs are \
-             forgeable and anyone can read or write. Set a strong secret before \
-             exposing this server."
+            "auth is DISABLED — anyone who can reach this server can read and \
+             write. Development/trusted-network use only."
+        );
+    } else if config.auth.oidc_issuers.is_empty() {
+        tracing::warn!(
+            "auth is enabled but no OIDC issuers are configured — no external \
+             client can authenticate. Set auth.oidc_issuers (or \
+             OPENXET_OIDC_ISSUERS), or disable auth for development."
         );
     }
 
@@ -61,12 +66,19 @@ async fn main() -> Result<()> {
         );
     }
 
+    let fetch_token_secret: Arc<str> = {
+        use rand::Rng;
+        let bytes: [u8; 32] = rand::thread_rng().r#gen();
+        hex::encode(bytes).into()
+    };
+
     let state = AppState {
         storage,
         file_index,
         chunk_index,
         config: Arc::new(config.clone()),
         jwks,
+        fetch_token_secret,
     };
 
     let app = build_router(state);

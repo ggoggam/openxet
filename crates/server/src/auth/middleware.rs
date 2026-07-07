@@ -40,14 +40,14 @@ struct OidcClaims {
     exp: usize,
 }
 
-/// Map a verified OIDC token onto OpenXet [`Claims`]. Until role→scope mapping
-/// is implemented, OIDC-authenticated callers are granted read-only access,
-/// which is the safe default: a valid Keycloak token proves identity but not
-/// yet write authorization.
-// TODO(auth): derive scope/repo from Keycloak realm/client roles or a custom claim.
+/// Map a verified OIDC token onto OpenXet [`Claims`]. Any valid token from an
+/// allowed issuer is granted full read/write access to all repos: issuance is
+/// the deployment's access-control point (e.g. who Keycloak gives tokens to).
+// ponytail: no role→scope mapping; add a scope/role claim check when a
+// deployment needs read-only or per-repo grants.
 fn oidc_claims_to_app_claims(oidc: OidcClaims) -> Claims {
     Claims {
-        scope: Scope::Read,
+        scope: Scope::Write,
         repo: String::new(),
         exp: oidc.exp,
     }
@@ -72,19 +72,17 @@ fn unverified_issuer(token: &str, alg: Algorithm) -> Result<String, AppError> {
     Ok(data.claims.iss)
 }
 
-/// Verify a bearer token and return its OpenXet claims. HS256/HS384/HS512
-/// tokens are checked against the configured shared secret (the self-minted
-/// and presigned-URL path). Asymmetric tokens are verified against the issuing
-/// OIDC provider's JWKS when OIDC is configured.
+/// Verify a bearer token and return its OpenXet claims. HS256 tokens are
+/// checked against the server's per-process fetch-token secret (the
+/// self-minted presigned-URL path — clients never hold this secret).
+/// Asymmetric tokens are verified against the issuing OIDC provider's JWKS.
 async fn verify_token(state: &AppState, token: &str) -> Result<Claims, AppError> {
     let header =
         decode_header(token).map_err(|e| AppError::Unauthorized(format!("invalid token: {e}")))?;
 
     match header.alg {
-        Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512 => {
-            validate_token(&state.config.auth.secret, token)
-                .map_err(|e| AppError::Unauthorized(format!("invalid token: {e}")))
-        }
+        Algorithm::HS256 => validate_token(&state.fetch_token_secret, token)
+            .map_err(|e| AppError::Unauthorized(format!("invalid token: {e}"))),
         _ => {
             if !state.jwks.is_enabled() {
                 return Err(AppError::Unauthorized(
@@ -123,6 +121,32 @@ async fn verify_token(state: &AppState, token: &str) -> Result<Claims, AppError>
     }
 }
 
+/// Authenticate the request and check it has the required scope. When auth is
+/// disabled in config, every request passes with write scope.
+async fn authorize(parts: &Parts, state: &AppState, required: Scope) -> Result<Claims, AppError> {
+    if !state.config.auth.enabled {
+        return Ok(Claims {
+            scope: Scope::Write,
+            repo: String::new(),
+            exp: usize::MAX,
+        });
+    }
+
+    let token = extract_bearer_token(parts)?.to_string();
+    let claims = verify_token(state, &token).await?;
+
+    if !claims.scope.satisfies(required) {
+        return Err(AppError::Unauthorized(format!(
+            "insufficient scope: {} required",
+            match required {
+                Scope::Read => "read",
+                Scope::Write => "write",
+            }
+        )));
+    }
+    Ok(claims)
+}
+
 /// Axum extractor that requires at least `read` scope.
 pub struct RequireRead(pub Claims);
 
@@ -130,16 +154,7 @@ impl FromRequestParts<AppState> for RequireRead {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        let token = extract_bearer_token(parts)?.to_string();
-        let claims = verify_token(state, &token).await?;
-
-        if !claims.scope.satisfies(Scope::Read) {
-            return Err(AppError::Unauthorized(
-                "insufficient scope: read required".to_string(),
-            ));
-        }
-
-        Ok(RequireRead(claims))
+        Ok(RequireRead(authorize(parts, state, Scope::Read).await?))
     }
 }
 
@@ -150,15 +165,6 @@ impl FromRequestParts<AppState> for RequireWrite {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        let token = extract_bearer_token(parts)?.to_string();
-        let claims = verify_token(state, &token).await?;
-
-        if !claims.scope.satisfies(Scope::Write) {
-            return Err(AppError::Unauthorized(
-                "insufficient scope: write required".to_string(),
-            ));
-        }
-
-        Ok(RequireWrite(claims))
+        Ok(RequireWrite(authorize(parts, state, Scope::Write).await?))
     }
 }

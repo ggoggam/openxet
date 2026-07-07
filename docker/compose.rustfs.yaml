@@ -46,7 +46,9 @@ services:
       OPENXET_HOST: "0.0.0.0"
       OPENXET_PORT: "8080"
       OPENXET_DATA_DIR: /.data
-      OPENXET_AUTH_SECRET: change-me-in-production
+      # Local demo runs without auth; production should configure OIDC
+      # (OPENXET_OIDC_ISSUERS) instead.
+      OPENXET_AUTH_ENABLED: "false"
       OPENXET_STORAGE_BACKEND: s3
       OPENXET_S3_BUCKET: openxet
       OPENXET_S3_REGION: us-east-1

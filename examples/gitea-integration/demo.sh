@@ -31,7 +31,6 @@ GITEA_PASS="xetpass123"
 REPO_NAME="my-dataset"
 
 export OPENXET_URL="http://localhost:8080"
-export OPENXET_AUTH_SECRET="change-me-in-production" # must match compose
 export OPENXET_CLIENT="$REPO_ROOT/target/release/openxet-client"
 
 WORK_DIR="$(mktemp -d)"

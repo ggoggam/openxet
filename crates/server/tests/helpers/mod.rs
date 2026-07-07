@@ -35,6 +35,15 @@ pub struct TestServer {
 
 impl TestServer {
     pub async fn start() -> Self {
+        Self::start_inner(true).await
+    }
+
+    #[allow(dead_code)]
+    pub async fn start_with_auth_disabled() -> Self {
+        Self::start_inner(false).await
+    }
+
+    async fn start_inner(auth_enabled: bool) -> Self {
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path().join("data");
 
@@ -58,7 +67,7 @@ impl TestServer {
                 ..Default::default()
             },
             auth: openxet_server::config::AuthConfig {
-                secret: TEST_SECRET.to_string(),
+                enabled: auth_enabled,
                 shard_key_ttl_seconds: 3600,
                 ..Default::default()
             },
@@ -79,6 +88,9 @@ impl TestServer {
             chunk_index,
             config: Arc::new(config),
             jwks,
+            // Tests mint HS256 tokens against this known secret, exercising
+            // the same verify path the server's self-minted fetch tokens use.
+            fetch_token_secret: TEST_SECRET.into(),
         };
 
         let app = build_router(state);

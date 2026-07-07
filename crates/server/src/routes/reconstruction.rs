@@ -179,7 +179,7 @@ pub async fn get_reconstruction(
     // fetch_info URLs must be fetchable with no Authorization header (xet-core
     // treats them like presigned S3 URLs), so embed a short-lived read token.
     let fetch_token = create_token(
-        &state.config.auth.secret,
+        &state.fetch_token_secret,
         &Claims {
             scope: Scope::Read,
             repo: claims.repo.clone(),

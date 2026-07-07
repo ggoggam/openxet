@@ -56,12 +56,12 @@ The git filter shells out to `openxet-client`. Build it once (release):
 cargo build --release -p openxet-client
 ```
 
-Export the config the filter and client read (the secret **must** match
-`OPENXET_AUTH_SECRET` in `docker/compose.rustfs.yaml`):
+Export the config the filter and client read (the demo server runs with
+`OPENXET_AUTH_ENABLED=false`, so tokens are not checked; production
+deployments authenticate via OIDC — see `OPENXET_OIDC_ISSUERS`):
 
 ```bash
 export OPENXET_URL="http://localhost:8080"
-export OPENXET_AUTH_SECRET="change-me-in-production"
 export OPENXET_CLIENT="$(pwd)/target/release/openxet-client"
 ```
 
@@ -199,9 +199,9 @@ ls -l data.parquet       # real bytes, not the pointer
 
 Open the **OpenXet** web UI (not Gitea): **http://localhost:8080**
 
-1. In the header, paste the auth secret `change-me-in-production` into the
-   secret field. The UI mints a short-lived JWT locally (there's no login
-   endpoint — on huggingface.co the Hub issues the token).
+1. The demo server runs with auth disabled, so the header's secret field can
+   hold any value (the JWT the UI mints locally is not checked). Against a
+   production server, requests need an OIDC access token instead.
 2. Go to **Files**, then **open by hash**, and paste the `xet-file-hash` from
    step 5 (or navigate directly to `http://localhost:8080/files/<hash>`).
 
