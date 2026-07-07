@@ -21,9 +21,9 @@ fn extract_bearer_token(parts: &Parts) -> Result<&str, AppError> {
     let header = header
         .to_str()
         .map_err(|_| AppError::Unauthorized("invalid authorization header".to_string()))?;
-    header.strip_prefix("Bearer ").ok_or_else(|| {
-        AppError::Unauthorized("invalid authorization header format".to_string())
-    })
+    header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| AppError::Unauthorized("invalid authorization header format".to_string()))
 }
 
 /// Minimal claims decoded from an OIDC (e.g. Keycloak) token. Signature,

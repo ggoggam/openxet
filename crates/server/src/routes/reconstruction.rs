@@ -190,7 +190,11 @@ pub async fn get_reconstruction(
             let byte_start = chunk_offsets[start_idx].0;
             let byte_end = chunk_offsets[end_idx - 1].1 - 1; // inclusive for HTTP Range
 
-            let url = match state.storage.presigned_xorb_url(&term.hash, url_ttl).await? {
+            let url = match state
+                .storage
+                .presigned_xorb_url(&term.hash, url_ttl)
+                .await?
+            {
                 Some(presigned) => presigned,
                 None => format!("{base_url}/v1/xorbs/default/{}", term.hash),
             };

@@ -21,93 +21,94 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
     // Cloud backends can mint presigned URLs (the `Signer` handle); the local
     // filesystem cannot, so its signer is `None` and downloads fall back to the
     // server's own xorb route.
-    let (store, signer): (Arc<dyn ObjectStore>, Option<Arc<dyn Signer>>) = match config
-        .backend
-        .as_str()
-    {
-        "filesystem" => {
-            // `LocalFileSystem` requires its root prefix to exist; also create
-            // the xorb/shard subtrees so listing an empty store never errors.
-            let data_dir = &config.data_dir;
-            tokio::fs::create_dir_all(data_dir.join("xorbs").join("default"))
-                .await
-                .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
-            tokio::fs::create_dir_all(data_dir.join("shards"))
-                .await
-                .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+    let (store, signer): (Arc<dyn ObjectStore>, Option<Arc<dyn Signer>>) =
+        match config.backend.as_str() {
+            "filesystem" => {
+                // `LocalFileSystem` requires its root prefix to exist; also create
+                // the xorb/shard subtrees so listing an empty store never errors.
+                let data_dir = &config.data_dir;
+                tokio::fs::create_dir_all(data_dir.join("xorbs").join("default"))
+                    .await
+                    .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
+                tokio::fs::create_dir_all(data_dir.join("shards"))
+                    .await
+                    .with_context(|| format!("failed to create data dir {}", data_dir.display()))?;
 
-            let store = LocalFileSystem::new_with_prefix(data_dir)
-                .context("failed to initialize filesystem storage")?;
-            (Arc::new(store) as Arc<dyn ObjectStore>, None)
-        }
-        "s3" => {
-            let bucket = config
-                .s3_bucket
-                .as_deref()
-                .context("s3_bucket is required for S3 backend")?;
-
-            let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
-
-            if let Some(region) = &config.s3_region {
-                builder = builder.with_region(region);
+                let store = LocalFileSystem::new_with_prefix(data_dir)
+                    .context("failed to initialize filesystem storage")?;
+                (Arc::new(store) as Arc<dyn ObjectStore>, None)
             }
-            if let Some(endpoint) = &config.s3_endpoint {
-                builder = builder.with_endpoint(endpoint);
-            }
-            if let Some(key_id) = &config.s3_access_key_id {
-                builder = builder.with_access_key_id(key_id);
-            }
-            if let Some(secret) = &config.s3_secret_access_key {
-                builder = builder.with_secret_access_key(secret);
-            }
-            if config.s3_allow_http == Some(true) {
-                builder = builder.with_allow_http(true);
-            }
+            "s3" => {
+                let bucket = config
+                    .s3_bucket
+                    .as_deref()
+                    .context("s3_bucket is required for S3 backend")?;
 
-            let s3 = Arc::new(builder.build().context("failed to build S3 client")?);
-            (s3.clone() as Arc<dyn ObjectStore>, Some(s3 as Arc<dyn Signer>))
-        }
-        "gcs" => {
-            let bucket = config
-                .gcs_bucket
-                .as_deref()
-                .context("gcs_bucket is required for GCS backend")?;
+                let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
 
-            let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
+                if let Some(region) = &config.s3_region {
+                    builder = builder.with_region(region);
+                }
+                if let Some(endpoint) = &config.s3_endpoint {
+                    builder = builder.with_endpoint(endpoint);
+                }
+                if let Some(key_id) = &config.s3_access_key_id {
+                    builder = builder.with_access_key_id(key_id);
+                }
+                if let Some(secret) = &config.s3_secret_access_key {
+                    builder = builder.with_secret_access_key(secret);
+                }
+                if config.s3_allow_http == Some(true) {
+                    builder = builder.with_allow_http(true);
+                }
 
-            if let Some(path) = &config.gcs_service_account_path {
-                builder = builder.with_service_account_path(path);
+                let s3 = Arc::new(builder.build().context("failed to build S3 client")?);
+                (
+                    s3.clone() as Arc<dyn ObjectStore>,
+                    Some(s3 as Arc<dyn Signer>),
+                )
             }
+            "gcs" => {
+                let bucket = config
+                    .gcs_bucket
+                    .as_deref()
+                    .context("gcs_bucket is required for GCS backend")?;
 
-            let gcs = Arc::new(builder.build().context("failed to build GCS client")?);
-            (
-                gcs.clone() as Arc<dyn ObjectStore>,
-                Some(gcs as Arc<dyn Signer>),
-            )
-        }
-        "azure" => {
-            let container = config
-                .azure_container
-                .as_deref()
-                .context("azure_container is required for Azure backend")?;
+                let mut builder = GoogleCloudStorageBuilder::new().with_bucket_name(bucket);
 
-            let mut builder = MicrosoftAzureBuilder::new().with_container_name(container);
+                if let Some(path) = &config.gcs_service_account_path {
+                    builder = builder.with_service_account_path(path);
+                }
 
-            if let Some(account) = &config.azure_account {
-                builder = builder.with_account(account);
+                let gcs = Arc::new(builder.build().context("failed to build GCS client")?);
+                (
+                    gcs.clone() as Arc<dyn ObjectStore>,
+                    Some(gcs as Arc<dyn Signer>),
+                )
             }
-            if let Some(key) = &config.azure_access_key {
-                builder = builder.with_access_key(key);
-            }
+            "azure" => {
+                let container = config
+                    .azure_container
+                    .as_deref()
+                    .context("azure_container is required for Azure backend")?;
 
-            let azure = Arc::new(builder.build().context("failed to build Azure client")?);
-            (
-                azure.clone() as Arc<dyn ObjectStore>,
-                Some(azure as Arc<dyn Signer>),
-            )
-        }
-        other => bail!("unknown storage backend: {other}"),
-    };
+                let mut builder = MicrosoftAzureBuilder::new().with_container_name(container);
+
+                if let Some(account) = &config.azure_account {
+                    builder = builder.with_account(account);
+                }
+                if let Some(key) = &config.azure_access_key {
+                    builder = builder.with_access_key(key);
+                }
+
+                let azure = Arc::new(builder.build().context("failed to build Azure client")?);
+                (
+                    azure.clone() as Arc<dyn ObjectStore>,
+                    Some(azure as Arc<dyn Signer>),
+                )
+            }
+            other => bail!("unknown storage backend: {other}"),
+        };
 
     Ok(ObjectStoreBackend::new(store, signer))
 }

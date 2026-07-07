@@ -345,8 +345,7 @@ async fn test_xetcore_xorb_with_cas_object_footer() {
     assert!(!recon.terms.is_empty());
 
     // Verify we can reconstruct the full file from the response
-    let reconstructed =
-        reconstruct_file_from_response(&server.client, &recon).await;
+    let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
     assert_eq!(
         reconstructed.len(),
         data.len(),
