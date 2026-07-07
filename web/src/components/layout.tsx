@@ -1,7 +1,7 @@
 import { Link, useRouterState } from "@tanstack/react-router";
 import { Database, Files, KeyRound, Upload } from "lucide-react";
 import { Input } from "@/components/ui/input";
-import { setSecret, useSecret } from "@/lib/auth";
+import { setToken, useToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
 
 const navItems = [
@@ -9,31 +9,23 @@ const navItems = [
   { to: "/upload", label: "Upload", icon: Upload },
 ] as const;
 
-/** The server authenticates /v1 calls with JWTs signed by its
- * OPENXET_AUTH_SECRET; the UI mints tokens locally from this secret. */
-function SecretField() {
-  const secret = useSecret();
+/** The server authenticates /v1 calls with OIDC bearer tokens; paste one here
+ * and the UI sends it verbatim. Optional against a dev server with auth off. */
+function TokenField() {
+  const token = useToken();
 
   return (
     <div
       className="ml-auto flex items-center gap-2"
-      title="OPENXET_AUTH_SECRET of the server — used to mint access tokens in this browser"
+      title="Bearer token from your OIDC provider — sent as Authorization on /v1 calls. Optional against a dev server with auth disabled."
     >
-      <KeyRound
-        className={cn(
-          "size-4",
-          secret ? "text-muted-foreground" : "text-amber-500",
-        )}
-      />
+      <KeyRound className="size-4 text-muted-foreground" />
       <Input
         type="password"
-        placeholder="Auth secret required"
-        value={secret}
-        onChange={(e) => setSecret(e.target.value)}
-        className={cn(
-          "h-8 w-48 text-sm",
-          !secret && "border-amber-500 ring-1 ring-amber-500/50",
-        )}
+        placeholder="Bearer token (optional)"
+        value={token}
+        onChange={(e) => setToken(e.target.value)}
+        className="h-8 w-48 text-sm"
       />
     </div>
   );
@@ -76,7 +68,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
             })}
           </nav>
 
-          <SecretField />
+          <TokenField />
         </div>
       </header>
 

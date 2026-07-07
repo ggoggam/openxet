@@ -124,3 +124,15 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Indeterminate progress bar: a segment sweeping across. transform-only, so it
+   animates on the compositor and keeps moving while a blocking wasm call
+   (chunk/hash) has frozen the main thread. */
+@keyframes indeterminate-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(350%);
+  }
+}

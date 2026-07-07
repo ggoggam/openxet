@@ -1,66 +1,35 @@
-// Client-side auth: the server validates HS256 JWTs signed with its
-// OPENXET_AUTH_SECRET (claims: scope/repo/exp). There is no token-issuing
-// endpoint — on huggingface.co that's the Hub's job — so this dev console
-// mints tokens in the browser via WebCrypto from a user-provided secret.
+// Client-side auth: real OpenXet servers verify OIDC bearer tokens against the
+// issuing provider's JWKS. This dev console stores a bearer token you paste
+// (obtained from your IdP) and sends it verbatim — there is no shared secret
+// and no token minting here. Against a server with auth disabled, leave it blank.
 
 import { useSyncExternalStore } from "react";
 
-const SECRET_KEY = "openxet.secret";
+const TOKEN_KEY = "openxet.token";
 
 const listeners = new Set<() => void>();
 
-export function getSecret(): string {
-  return localStorage.getItem(SECRET_KEY) ?? "";
+export function getToken(): string {
+  return localStorage.getItem(TOKEN_KEY) ?? "";
 }
 
-export function setSecret(secret: string) {
-  localStorage.setItem(SECRET_KEY, secret);
+export function setToken(token: string) {
+  localStorage.setItem(TOKEN_KEY, token);
   listeners.forEach((l) => l());
 }
 
-/** Reactive secret: components re-render when it changes anywhere in the app. */
-export function useSecret(): string {
+/** Reactive token: components re-render when it changes anywhere in the app. */
+export function useToken(): string {
   return useSyncExternalStore((cb) => {
     listeners.add(cb);
     return () => listeners.delete(cb);
-  }, getSecret);
+  }, getToken);
 }
 
-function b64url(bytes: Uint8Array): string {
-  let bin = "";
-  for (const b of bytes) bin += String.fromCharCode(b);
-  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-}
-
-export type Scope = "read" | "write";
-
-export async function mintToken(scope: Scope): Promise<string> {
-  const secret = getSecret();
-  if (!secret) {
-    throw new Error(
-      "No auth secret configured — paste the server's OPENXET_AUTH_SECRET in the header field.",
-    );
-  }
-  const enc = new TextEncoder();
-  const header = b64url(enc.encode(JSON.stringify({ alg: "HS256", typ: "JWT" })));
-  const payload = b64url(
-    enc.encode(
-      JSON.stringify({
-        scope,
-        repo: "web/ui",
-        exp: Math.floor(Date.now() / 1000) + 3600,
-      }),
-    ),
-  );
-  const key = await crypto.subtle.importKey(
-    "raw",
-    enc.encode(secret),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"],
-  );
-  const sig = new Uint8Array(
-    await crypto.subtle.sign("HMAC", key, enc.encode(`${header}.${payload}`)),
-  );
-  return `${header}.${payload}.${b64url(sig)}`;
+/** Authorization headers for a /v1 request. Empty when no token is set: a dev
+ * server (auth disabled) accepts the request; a server with auth on returns
+ * 401 and the error surfaces to the UI. */
+export function authHeaders(): HeadersInit {
+  const token = getToken();
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }

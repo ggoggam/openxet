@@ -1415,12 +1415,10 @@ dependencies = [
  "clap",
  "hex",
  "hmac",
- "jsonwebtoken",
  "openxet-cas-types",
  "openxet-chunking",
  "openxet-hashing",
  "reqwest",
- "serde",
  "serde_json",
  "sha2",
 ]

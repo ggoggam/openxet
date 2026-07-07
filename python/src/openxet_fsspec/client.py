@@ -64,12 +64,12 @@ def decode_chunks(data: bytes, start: int, end: int) -> bytes:
 class CasClient:
     """OpenXet /v1 data plane: hf_xet for upload, Xet reconstruction for download."""
 
-    def __init__(self, endpoint, secret=None, token=None, repo="openxet/fsspec"):
-        if not secret and not token:
-            raise ValueError("need cas_secret (to mint JWTs) or cas_token")
+    def __init__(self, endpoint, token=None, repo="openxet/fsspec"):
+        # token is optional: a dev server (auth disabled) accepts unauthenticated
+        # requests. Real servers verify OIDC bearer tokens — pass one obtained
+        # from your IdP. There is no shared secret and no local token minting.
         self.endpoint = endpoint.rstrip("/")
-        self.secret = secret
-        self.static_token = token
+        self.token = token
         self.repo = repo
         self._session = None
 
@@ -85,15 +85,6 @@ class CasClient:
             await self._session.close()
             self._session = None
 
-    def _token(self, scope):
-        if self.static_token:
-            return self.static_token, int(time.time()) + 3600
-        import jwt  # noqa: PLC0415 -- optional dep, imported only when minting JWTs
-
-        exp = int(time.time()) + 3600
-        payload = {"scope": scope, "repo": self.repo, "exp": exp}
-        return jwt.encode(payload, self.secret, algorithm="HS256"), exp
-
     async def download(self, file_hash, start=None, end=None) -> bytes:
         """Fetch bytes for `file_hash`; start/end are an inclusive byte range.
 
@@ -101,8 +92,7 @@ class CasClient:
         each term's xorb byte range from its presigned URL, decode the chunk
         frames, and reassemble.
         """
-        token, _ = self._token("read")
-        headers = {"Authorization": f"Bearer {token}"}
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         if start is not None:
             headers["Range"] = f"bytes={start}-{'' if end is None else end}"
         url = f"{self.endpoint}/v1/reconstructions/{file_hash}"
@@ -151,7 +141,10 @@ class CasClient:
     def _upload_blocking(self, data: bytes) -> str:
         import hf_xet  # noqa: PLC0415 -- heavy native dep, imported off-loop on write
 
-        token, exp = self._token("write")
+        # hf_xet requires a token string; a dev server with auth disabled ignores
+        # it, and a real server verifies it as an OIDC bearer token.
+        token = self.token or ""
+        exp = int(time.time()) + 3600
         session = hf_xet.XetSession()
         commit = session.new_upload_commit(
             endpoint=self.endpoint, token=token, token_expiry_unix_secs=exp

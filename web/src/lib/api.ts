@@ -3,7 +3,7 @@
 // as xorbs + a shard; downloads fetch the reconstruction plan and reassemble
 // the file client-side from xorb byte ranges (chunk decoding via openxet-wasm).
 
-import { mintToken, type Scope } from "./auth";
+import { authHeaders } from "./auth";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -45,20 +45,30 @@ export interface UploadResult {
   file_hash: string;
   file_size: number;
   chunk_count: number;
+  /** Chunks resolved to already-stored xorbs — skipped, not re-uploaded. */
+  deduped_chunk_count: number;
   xorb_hashes: string[];
 }
 
+/**
+ * What the upload pipeline is doing right now, for the UI. `hashing`,
+ * `packing`, and `registering` are indeterminate (single blocking steps);
+ * `dedup` reports how many chunk probes have settled; `uploading` reports
+ * bytes.
+ */
+export type UploadStatus =
+  | { phase: "hashing" }
+  | { phase: "dedup"; queried: number }
+  | { phase: "packing" }
+  | { phase: "uploading"; uploaded: number; total: number }
+  | { phase: "registering" };
+
 // ─── HTTP helpers ────────────────────────────────────────────────────────────
 
-async function authFetch(
-  path: string,
-  scope: Scope,
-  init?: RequestInit,
-): Promise<Response> {
-  const token = await mintToken(scope);
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, {
     ...init,
-    headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+    headers: { ...init?.headers, ...authHeaders() },
   });
   if (!res.ok && res.status !== 206) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -70,7 +80,7 @@ async function authFetch(
 // ─── Read paths ──────────────────────────────────────────────────────────────
 
 export async function fetchFileDetail(hash: string): Promise<FileDetail> {
-  const res = await authFetch(`/v1/reconstructions/${hash}`, "read");
+  const res = await authFetch(`/v1/reconstructions/${hash}`);
   const reconstruction: ReconstructionResponse = await res.json();
   const total_size = reconstruction.terms.reduce(
     (sum, t) => sum + t.unpacked_length,
@@ -90,7 +100,6 @@ async function reconstructContent(
 ): Promise<ArrayBuffer> {
   const res = await authFetch(
     `/v1/reconstructions/${hash}`,
-    "read",
     range ? { headers: { Range: `bytes=${range.start}-${range.end}` } } : {},
   );
   const recon: ReconstructionResponse = await res.json();
@@ -156,29 +165,43 @@ async function loadWasm() {
   return mod;
 }
 
+// Let the browser paint the latest phase label before we hand the main thread
+// to a blocking wasm call (chunk/hash, pack). Double rAF = one fully painted
+// frame; a compositor-driven bar keeps animating through the freeze that follows.
+const yieldToPaint = () =>
+  new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+
 export async function uploadFile(
   file: File,
-  onProgress?: (uploaded: number, total: number) => void,
+  onStatus?: (status: UploadStatus) => void,
 ): Promise<UploadResult> {
   const data = new Uint8Array(await file.arrayBuffer());
   const wasm = await loadWasm();
 
-  // Global dedup pass: probe chunk hashes against the server and resolve
-  // already-stored chunks to their existing xorbs, so only new data uploads.
+  // Chunk + hash the whole file in wasm. One synchronous main-thread call with
+  // no sub-progress hook, so we can only announce the phase — yield first so
+  // the label is on screen before the tab freezes for the hash.
+  onStatus?.({ phase: "hashing" });
+  await yieldToPaint();
   const session = new wasm.UploadSession(data);
   let plan;
   try {
+    // Global dedup pass: probe chunk hashes against the server and resolve
+    // already-stored chunks to their existing xorbs, so only new data uploads.
     // Probes within a batch are independent, so fire them concurrently;
     // each settled batch may create new candidates (continuations of hits).
+    let queried = 0;
     const PROBE_BATCH = 16;
     for (;;) {
       const batch: string[] = session.next_query_batch(PROBE_BATCH);
       if (batch.length === 0) break;
-      const token = await mintToken("read");
+      const headers = authHeaders();
       await Promise.all(
         batch.map(async (probe) => {
           const res = await fetch(`/v1/chunks/default-merkledb/${probe}`, {
-            headers: { Authorization: `Bearer ${token}` },
+            headers,
           });
           if (res.ok) {
             // JS is single-threaded: applies run one at a time as responses
@@ -190,7 +213,12 @@ export async function uploadFile(
           // 404 = chunk unknown to the server; it will be packed and uploaded.
         }),
       );
+      queried += batch.length;
+      // The loop awaits above, so this repaints between batches on its own.
+      onStatus?.({ phase: "dedup", queried });
     }
+    onStatus?.({ phase: "packing" });
+    await yieldToPaint();
     plan = session.finish();
   } finally {
     session.free();
@@ -209,27 +237,28 @@ export async function uploadFile(
     // parallel_xorb_uploader). Serial POSTs stall on a full round trip per
     // xorb; a small pool overlaps them without flooding the server.
     let uploaded = 0;
-    onProgress?.(0, total);
+    onStatus?.({ phase: "uploading", uploaded: 0, total });
     const CONCURRENCY = 4;
     let next = 0;
     const worker = async () => {
       while (next < xorbCount) {
         const i = next++;
         const size = plan.xorb_size(i);
-        await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, "write", {
+        await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: new Blob([new Uint8Array(plan.xorb_data(i))]), // clone once, here
         });
         uploaded += size;
-        onProgress?.(uploaded, total);
+        onStatus?.({ phase: "uploading", uploaded, total });
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(CONCURRENCY, xorbCount) }, worker),
     );
 
-    await authFetch("/v1/shards", "write", {
+    onStatus?.({ phase: "registering" });
+    await authFetch("/v1/shards", {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: new Blob([new Uint8Array(plan.shard_bytes)]),
@@ -239,6 +268,7 @@ export async function uploadFile(
       file_hash: plan.file_hash,
       file_size: file.size,
       chunk_count: plan.chunk_count,
+      deduped_chunk_count: plan.deduped_chunk_count,
       xorb_hashes: xorbHashes,
     };
   } finally {

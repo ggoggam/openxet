@@ -13,7 +13,10 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
-const MAX_BODY_SIZE: usize = 64 * 1024 * 1024; // 64 MiB
+// 1 MiB above MAX_XORB_SIZE/MAX_SHARD_SIZE so the handlers' own size checks
+// fire first and return 413 with a payload-specific message, not axum's
+// generic body-limit 413.
+const MAX_BODY_SIZE: usize = 65 * 1024 * 1024;
 
 /// Replace any `token=…` value in a query string with a placeholder so
 /// short-lived fetch tokens (passed as `?token=` on presigned-style URLs) never
