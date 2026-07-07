@@ -8,7 +8,8 @@ examples/git-integration/git-openxet-protocol:
     xet-file-hash <64-hex>
     size <bytes>
 
-read:  forge contents API -> pointer -> GET /v1/content/{hash} (Range-capable)
+read:  forge contents API -> pointer -> Xet reconstruction (Range-capable):
+       GET /v1/reconstructions/{hash} -> ranged xorb fetches -> chunk decode
 write: hf_xet upload pipeline (chunk/dedup/xorb/shard) -> pointer -> forge commit
 
 Built on fsspec's AsyncFileSystem: every operation is a coroutine (`await

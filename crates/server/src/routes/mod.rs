@@ -1,4 +1,3 @@
-mod content;
 mod dedup;
 mod reconstruction;
 mod shard;
@@ -46,8 +45,7 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/reconstructions/{file_id}",
             get(reconstruction::get_reconstruction),
         )
-        .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup))
-        .route("/v1/content/{file_id}", get(content::get_content));
+        .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup));
 
     let frontend_dir = &state.config.server.frontend_dir;
     let spa_fallback = ServeDir::new(frontend_dir)
