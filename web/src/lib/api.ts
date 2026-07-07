@@ -45,8 +45,23 @@ export interface UploadResult {
   file_hash: string;
   file_size: number;
   chunk_count: number;
+  /** Chunks resolved to already-stored xorbs — skipped, not re-uploaded. */
+  deduped_chunk_count: number;
   xorb_hashes: string[];
 }
+
+/**
+ * What the upload pipeline is doing right now, for the UI. `hashing`,
+ * `packing`, and `registering` are indeterminate (single blocking steps);
+ * `dedup` reports how many chunk probes have settled; `uploading` reports
+ * bytes.
+ */
+export type UploadStatus =
+  | { phase: "hashing" }
+  | { phase: "dedup"; queried: number }
+  | { phase: "packing" }
+  | { phase: "uploading"; uploaded: number; total: number }
+  | { phase: "registering" };
 
 // ─── HTTP helpers ────────────────────────────────────────────────────────────
 
@@ -150,20 +165,34 @@ async function loadWasm() {
   return mod;
 }
 
+// Let the browser paint the latest phase label before we hand the main thread
+// to a blocking wasm call (chunk/hash, pack). Double rAF = one fully painted
+// frame; a compositor-driven bar keeps animating through the freeze that follows.
+const yieldToPaint = () =>
+  new Promise<void>((resolve) =>
+    requestAnimationFrame(() => requestAnimationFrame(() => resolve())),
+  );
+
 export async function uploadFile(
   file: File,
-  onProgress?: (uploaded: number, total: number) => void,
+  onStatus?: (status: UploadStatus) => void,
 ): Promise<UploadResult> {
   const data = new Uint8Array(await file.arrayBuffer());
   const wasm = await loadWasm();
 
-  // Global dedup pass: probe chunk hashes against the server and resolve
-  // already-stored chunks to their existing xorbs, so only new data uploads.
+  // Chunk + hash the whole file in wasm. One synchronous main-thread call with
+  // no sub-progress hook, so we can only announce the phase — yield first so
+  // the label is on screen before the tab freezes for the hash.
+  onStatus?.({ phase: "hashing" });
+  await yieldToPaint();
   const session = new wasm.UploadSession(data);
   let plan;
   try {
+    // Global dedup pass: probe chunk hashes against the server and resolve
+    // already-stored chunks to their existing xorbs, so only new data uploads.
     // Probes within a batch are independent, so fire them concurrently;
     // each settled batch may create new candidates (continuations of hits).
+    let queried = 0;
     const PROBE_BATCH = 16;
     for (;;) {
       const batch: string[] = session.next_query_batch(PROBE_BATCH);
@@ -184,7 +213,12 @@ export async function uploadFile(
           // 404 = chunk unknown to the server; it will be packed and uploaded.
         }),
       );
+      queried += batch.length;
+      // The loop awaits above, so this repaints between batches on its own.
+      onStatus?.({ phase: "dedup", queried });
     }
+    onStatus?.({ phase: "packing" });
+    await yieldToPaint();
     plan = session.finish();
   } finally {
     session.free();
@@ -203,7 +237,7 @@ export async function uploadFile(
     // parallel_xorb_uploader). Serial POSTs stall on a full round trip per
     // xorb; a small pool overlaps them without flooding the server.
     let uploaded = 0;
-    onProgress?.(0, total);
+    onStatus?.({ phase: "uploading", uploaded: 0, total });
     const CONCURRENCY = 4;
     let next = 0;
     const worker = async () => {
@@ -216,13 +250,14 @@ export async function uploadFile(
           body: new Blob([new Uint8Array(plan.xorb_data(i))]), // clone once, here
         });
         uploaded += size;
-        onProgress?.(uploaded, total);
+        onStatus?.({ phase: "uploading", uploaded, total });
       }
     };
     await Promise.all(
       Array.from({ length: Math.min(CONCURRENCY, xorbCount) }, worker),
     );
 
+    onStatus?.({ phase: "registering" });
     await authFetch("/v1/shards", {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
@@ -233,6 +268,7 @@ export async function uploadFile(
       file_hash: plan.file_hash,
       file_size: file.size,
       chunk_count: plan.chunk_count,
+      deduped_chunk_count: plan.deduped_chunk_count,
       xorb_hashes: xorbHashes,
     };
   } finally {

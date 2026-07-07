@@ -1,5 +1,6 @@
 [env]
 HF_XET_ENDPOINT="http://localhost:8080"
+OPENXET_AUTH_ENABLED="false"
 
 # Rust itself is expected via rustup (see README); everything else is
 # provisioned by `mise install`.
