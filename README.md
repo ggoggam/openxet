@@ -156,14 +156,10 @@ bun run lint       # ESLint
 
 ## Examples
 
-Runnable end-to-end demos live in [`examples/`](examples/README.md):
+An example lives in [`examples/`](examples/README.md):
 
 - **`hf-xet-client/`** — the stock [`hf_xet`](https://pypi.org/project/hf-xet/)
-  Python client uploading/downloading against OpenXet unmodified (wire-compat proof)
-- **`gitea-integration/`** — self-hosted Gitea + OpenXet + RustFS, with a
-  git clean/smudge filter pushing large files through the CAS
-- **`git-integration/`** — OpenXet as a git large-file backend, demonstrating
-  chunk-level dedup across revisions
+  Python client uploading/downloading against OpenXet unmodified (wire-compatibility proof)
 
 ## Protocol Details
 
