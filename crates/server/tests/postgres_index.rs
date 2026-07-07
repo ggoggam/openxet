@@ -71,5 +71,8 @@ async fn postgres_upload_reconstruct_and_dedup() {
         .unwrap();
     assert_eq!(resp.status(), 200, "dedup query for a known chunk failed");
     let dedup_shard = resp.bytes().await.unwrap();
-    assert!(!dedup_shard.is_empty(), "dedup response should be non-empty");
+    assert!(
+        !dedup_shard.is_empty(),
+        "dedup response should be non-empty"
+    );
 }

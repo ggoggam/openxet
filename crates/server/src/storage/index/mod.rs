@@ -180,10 +180,7 @@ impl ChunkIndex for ChunkIndexBackend {
         }
     }
 
-    async fn get_xorb_layout(
-        &self,
-        xorb_hash: &str,
-    ) -> Result<Option<XorbLayout>, StorageError> {
+    async fn get_xorb_layout(&self, xorb_hash: &str) -> Result<Option<XorbLayout>, StorageError> {
         match self {
             Self::RocksDb(i) => i.get_xorb_layout(xorb_hash).await,
             Self::Postgres(i) => i.get_xorb_layout(xorb_hash).await,

@@ -39,12 +39,10 @@ pub async fn init_schema(pool: &PgPool) -> Result<(), StorageError> {
     .await
     .map_err(pg_err)?;
 
-    sqlx::query(
-        "CREATE INDEX IF NOT EXISTS chunk_index_hash_seq ON chunk_index (chunk_hash, seq)",
-    )
-    .execute(pool)
-    .await
-    .map_err(pg_err)?;
+    sqlx::query("CREATE INDEX IF NOT EXISTS chunk_index_hash_seq ON chunk_index (chunk_hash, seq)")
+        .execute(pool)
+        .await
+        .map_err(pg_err)?;
 
     // Xorb layouts are stored as one JSON row per xorb: dedup responses need the
     // whole layout at once and never query it by chunk, so a serialized blob is
@@ -159,7 +157,8 @@ impl ChunkIndex for PostgresChunkIndex {
         layout: XorbLayout,
     ) -> Result<(), StorageError> {
         validate_hash(xorb_hash)?;
-        let json = serde_json::to_string(&layout).map_err(|e| StorageError::Index(e.to_string()))?;
+        let json =
+            serde_json::to_string(&layout).map_err(|e| StorageError::Index(e.to_string()))?;
         sqlx::query(
             "INSERT INTO xorb_layout (xorb_hash, layout) VALUES ($1, $2) \
              ON CONFLICT (xorb_hash) DO UPDATE SET layout = EXCLUDED.layout",
