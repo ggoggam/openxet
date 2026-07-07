@@ -86,6 +86,9 @@ enum Command {
         /// Output path, or "-" for stdout.
         #[arg(long, default_value = "-")]
         out: String,
+        /// Byte range "start-end" (inclusive, e.g. 1000-1999).
+        #[arg(long)]
+        range: Option<String>,
     },
 }
 
@@ -136,7 +139,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
     match &cli.cmd {
         Command::Put { file, stats } => cmd_put(&cli, file, *stats),
-        Command::Get { hash, out } => cmd_get(&cli, hash, out),
+        Command::Get { hash, out, range } => cmd_get(&cli, hash, out, range.as_deref()),
     }
 }
 
@@ -420,14 +423,28 @@ fn upload_xorb(
 
 // ─── download ──────────────────────────────────────────────────────────────
 
-fn cmd_get(cli: &Cli, hash: &str, out: &str) -> Result<()> {
+/// Parse "start-end" (inclusive) into (start, len).
+fn parse_range(s: &str) -> Result<(u64, u64)> {
+    let (start, end) = s.split_once('-').context("range must be start-end")?;
+    let (start, end): (u64, u64) = (start.trim().parse()?, end.trim().parse()?);
+    if end < start {
+        bail!("range end {end} < start {start}");
+    }
+    Ok((start, end - start + 1))
+}
+
+fn cmd_get(cli: &Cli, hash: &str, out: &str, range: Option<&str>) -> Result<()> {
     let token = mint_token(&cli.secret, "read", &cli.repo)?;
     let http = reqwest::blocking::Client::new();
+    let range = range.map(parse_range).transpose()?;
 
-    let resp = http
+    let mut req = http
         .get(format!("{}/v1/reconstructions/{}", cli.url, hash))
-        .bearer_auth(&token)
-        .send()?;
+        .bearer_auth(&token);
+    if let Some((start, len)) = range {
+        req = req.header("range", format!("bytes={}-{}", start, start + len - 1));
+    }
+    let resp = req.send()?;
     if !resp.status().is_success() {
         bail!("reconstruction failed ({}) for {hash}", resp.status());
     }
@@ -466,9 +483,14 @@ fn cmd_get(cli: &Cli, hash: &str, out: &str) -> Result<()> {
         }
     }
 
-    // Honor offset_into_first_range (0 for a full-file download).
-    let start = recon.offset_into_first_range as usize;
-    let body = &file_bytes[start.min(file_bytes.len())..];
+    // Terms are chunk-aligned: skip offset_into_first_range at the head, and
+    // for a range request truncate the tail to the requested length.
+    let start = (recon.offset_into_first_range as usize).min(file_bytes.len());
+    let end = match range {
+        Some((_, len)) => (start + len as usize).min(file_bytes.len()),
+        None => file_bytes.len(),
+    };
+    let body = &file_bytes[start..end];
 
     if out == "-" {
         std::io::stdout().write_all(body)?;
