@@ -363,8 +363,9 @@ xorbs + a shard; downloads fetch the reconstruction plan from
 `/v1/reconstructions` and reassemble the file client-side from ranged xorb
 fetches (chunk decoding via `openxet-wasm`). File listing has no protocol
 equivalent — the UI keeps a local
-catalog in browser localStorage. Auth tokens are minted in the browser
-(WebCrypto HS256) from the server secret.
+catalog in browser localStorage. For an auth-enabled server, paste an OIDC
+bearer token in the header field; the UI sends it verbatim (against a dev
+server with auth disabled, no token is needed).
 
 ### Static File Serving
 

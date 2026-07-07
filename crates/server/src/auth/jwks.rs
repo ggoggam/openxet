@@ -62,7 +62,7 @@ impl JwksCache {
     }
 
     /// Whether any OIDC issuer is configured. When false, the JWKS path is off
-    /// and only HS256 shared-secret tokens are accepted.
+    /// and only the server's own self-minted fetch-URL tokens (HS256) are accepted.
     pub fn is_enabled(&self) -> bool {
         !self.allowed_issuers.is_empty()
     }

@@ -56,7 +56,7 @@ docker compose -f docker/compose.local.yaml up -d --build
 docker compose -f docker/compose.rustfs.yaml up -d --build
 ```
 
-The server will be available at `http://localhost:8080`. Set `OPENXET_AUTH_SECRET` in the compose file for JWT authentication.
+The server will be available at `http://localhost:8080`. For authentication, configure OIDC issuers (`auth.oidc_issuers`); clients then present bearer tokens from that provider. Leave `auth.enabled = false` for local/dev use.
 
 ### Testing
 
@@ -137,9 +137,9 @@ speaks only the Xet wire protocol, like any other client:
 - **File detail** -- reconstruction terms from `/v1/reconstructions`; content
   preview/download reassembles the file in-browser from ranged xorb fetches
   (text, images, PDF, hex dump, and CSV/Parquet querying with DuckDB WASM)
-- **Auth** -- paste the server's `OPENXET_AUTH_SECRET` in the header field;
-  the UI mints short-lived JWTs locally via WebCrypto (there is no token
-  endpoint — on huggingface.co that's the Hub's job)
+- **Auth** -- for an auth-enabled server, paste an OIDC bearer token in the
+  header field and the UI sends it verbatim; against a dev server with auth
+  disabled, leave it blank
 
 ### Frontend Stack
 
@@ -170,7 +170,7 @@ cargo run -p openxet-client -- put ./bigfile.bin --report
 # Download by file hash
 cargo run -p openxet-client -- get <file-hash> --out ./restored.bin
 
-# Config via flags or env: --url/OPENXET_URL, --secret/OPENXET_AUTH_SECRET
+# Config via flags or env: --url/OPENXET_URL, --token/OPENXET_TOKEN (optional)
 ```
 
 ## Examples
@@ -209,7 +209,6 @@ mise run lint            # Run clippy
 mise run check           # Format check + clippy + tests
 mise run dev             # Build everything and run the server
 mise run fe:build        # Build frontend (installs deps + compiles the wasm pipeline)
-mise run jwt             # Mint a write-scope JWT for the default dev secret
 mise run up              # Docker compose up (RustFS backend)
 mise run down            # Docker compose down
 ```

@@ -14,25 +14,6 @@ prek = "latest"
 description = "Run pre-commit checks via prek"
 run = "prek run --show-diff-on-failure --color=always --all-files --hook-stage=manual"
 
-[tasks.jwt]
-description = "Mint a write-scope JWT for the default dev secret"
-run = """
-#!/usr/bin/env -S uv run --script
-# /// script
-# dependencies = ["pyjwt"]
-# ///
-
-import jwt, time
-
-secret = 'change-me-in-production'  # must match OPENXET_AUTH_SECRET
-token = jwt.encode({
-    'scope': 'write',
-    'repo': 'test/repo',
-    'exp': int(time.time()) + 86400
-}, secret, algorithm='HS256')
-print(token)
-"""
-
 # ── Docker ─────────────────────────────────────────────────────────────────────
 
 [tasks."docker:up"]

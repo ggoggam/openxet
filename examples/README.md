@@ -98,8 +98,9 @@ Under the hood `git-openxet-protocol` shells out to `openxet-client`
 and on download fetches `GET /v1/reconstructions/{file_id}`, pulls the byte
 ranges in `fetch_info`, and concatenates the decompressed chunks. It reuses the
 workspace's own hashing/chunking/cas-types crates, so it is wire-compatible with
-the server by construction. Build it with `cargo build -p openxet-client`; it
-mints its own JWT from `OPENXET_AUTH_SECRET` (must match the server).
+the server by construction. Build it with `cargo build -p openxet-client`; pass
+a bearer token via `--token`/`OPENXET_TOKEN` for an auth-enabled server, or omit
+it against a dev server with auth disabled.
 
 ## How OpenXet works as a dataset VCS
 
@@ -146,9 +147,9 @@ the `git-openxet-protocol` filter above to get real chunk-level dedup.
 ### Using a real Xet client
 
 Because the server speaks the Xet wire protocol, you can point Xet-aware tooling
-at it instead of HuggingFace's CAS. Authentication is a JWT signed with the
-server's `OPENXET_AUTH_SECRET` (scope `read` or `write`); mint one with
-`mise run jwt`. The reconstruction endpoint hands back `fetch_info` URLs that
+at it instead of HuggingFace's CAS. Authentication is an OIDC bearer token the
+server verifies against the issuer's JWKS (or no token at all when the server
+runs with auth disabled). The reconstruction endpoint hands back `fetch_info` URLs that
 point back at this server's `GET /v1/xorbs/default/{hash}` with byte ranges, so
 downloads work without any external object store — though for production you'd
 configure an S3/GCS/Azure backend (see `[storage]` in the config) so xorbs are

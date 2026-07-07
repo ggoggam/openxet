@@ -23,7 +23,7 @@ GITEA_USER = "xet"
 GITEA_PASS = "xetpass123"
 REPO = "fsspec-demo"
 CAS_URL = os.environ.get("OPENXET_URL", "http://localhost:8080")
-CAS_SECRET = os.environ.get("OPENXET_AUTH_SECRET", "change-me-in-production")
+CAS_TOKEN = os.environ.get("OPENXET_TOKEN")  # None → dev server (auth disabled)
 
 FS_OPTS = {
     "forge_url": f"{GITEA_URL}/api/v1",
@@ -33,7 +33,7 @@ FS_OPTS = {
     "ref": "main",
     "forge_auth": (GITEA_USER, GITEA_PASS),
     "cas_url": CAS_URL,
-    "cas_secret": CAS_SECRET,
+    "cas_token": CAS_TOKEN,
 }
 
 # ── offline self-check: pointer round-trip ───────────────────────────────────

@@ -3,7 +3,7 @@
 // as xorbs + a shard; downloads fetch the reconstruction plan and reassemble
 // the file client-side from xorb byte ranges (chunk decoding via openxet-wasm).
 
-import { mintToken, type Scope } from "./auth";
+import { authHeaders } from "./auth";
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -50,15 +50,10 @@ export interface UploadResult {
 
 // ─── HTTP helpers ────────────────────────────────────────────────────────────
 
-async function authFetch(
-  path: string,
-  scope: Scope,
-  init?: RequestInit,
-): Promise<Response> {
-  const token = await mintToken(scope);
+async function authFetch(path: string, init?: RequestInit): Promise<Response> {
   const res = await fetch(path, {
     ...init,
-    headers: { ...init?.headers, Authorization: `Bearer ${token}` },
+    headers: { ...init?.headers, ...authHeaders() },
   });
   if (!res.ok && res.status !== 206) {
     const body = await res.json().catch(() => ({ error: res.statusText }));
@@ -70,7 +65,7 @@ async function authFetch(
 // ─── Read paths ──────────────────────────────────────────────────────────────
 
 export async function fetchFileDetail(hash: string): Promise<FileDetail> {
-  const res = await authFetch(`/v1/reconstructions/${hash}`, "read");
+  const res = await authFetch(`/v1/reconstructions/${hash}`);
   const reconstruction: ReconstructionResponse = await res.json();
   const total_size = reconstruction.terms.reduce(
     (sum, t) => sum + t.unpacked_length,
@@ -90,7 +85,6 @@ async function reconstructContent(
 ): Promise<ArrayBuffer> {
   const res = await authFetch(
     `/v1/reconstructions/${hash}`,
-    "read",
     range ? { headers: { Range: `bytes=${range.start}-${range.end}` } } : {},
   );
   const recon: ReconstructionResponse = await res.json();
@@ -174,11 +168,11 @@ export async function uploadFile(
     for (;;) {
       const batch: string[] = session.next_query_batch(PROBE_BATCH);
       if (batch.length === 0) break;
-      const token = await mintToken("read");
+      const headers = authHeaders();
       await Promise.all(
         batch.map(async (probe) => {
           const res = await fetch(`/v1/chunks/default-merkledb/${probe}`, {
-            headers: { Authorization: `Bearer ${token}` },
+            headers,
           });
           if (res.ok) {
             // JS is single-threaded: applies run one at a time as responses
@@ -216,7 +210,7 @@ export async function uploadFile(
       while (next < xorbCount) {
         const i = next++;
         const size = plan.xorb_size(i);
-        await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, "write", {
+        await authFetch(`/v1/xorbs/default/${xorbHashes[i]}`, {
           method: "POST",
           headers: { "Content-Type": "application/octet-stream" },
           body: new Blob([new Uint8Array(plan.xorb_data(i))]), // clone once, here
@@ -229,7 +223,7 @@ export async function uploadFile(
       Array.from({ length: Math.min(CONCURRENCY, xorbCount) }, worker),
     );
 
-    await authFetch("/v1/shards", "write", {
+    await authFetch("/v1/shards", {
       method: "POST",
       headers: { "Content-Type": "application/octet-stream" },
       body: new Blob([new Uint8Array(plan.shard_bytes)]),

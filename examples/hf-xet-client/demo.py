@@ -6,10 +6,11 @@ chunk-level dedup, then download them back via CAS reconstruction — no OpenXet
 code involved on the client side.
 
 The only piece hf_xet does not provide is token *issuance* (on huggingface.co
-that's the Hub's `xet-{read,write}-token` endpoint). OpenXet validates JWTs
-signed with its `OPENXET_AUTH_SECRET`, so we mint one locally with PyJWT.
+that's the Hub's `xet-{read,write}-token` endpoint). OpenXet's server verifies
+OIDC bearer tokens; pass one via OPENXET_TOKEN, or run the server with auth
+disabled (dev) and leave it unset — the server then ignores the token.
 
-Env: OPENXET_URL (default http://127.0.0.1:8080), OPENXET_AUTH_SECRET.
+Env: OPENXET_URL (default http://127.0.0.1:8080), OPENXET_TOKEN (optional).
 """
 
 import os
@@ -18,25 +19,21 @@ import tempfile
 import time
 
 import hf_xet
-import jwt
 
 ENDPOINT = os.environ.get("OPENXET_URL", "http://127.0.0.1:8080")
-SECRET = os.environ.get("OPENXET_AUTH_SECRET", "change-me-in-production")
+# Optional bearer token; a dev server (auth disabled) ignores it, a real one
+# verifies it via OIDC/JWKS. hf_xet requires a string, so default to empty.
+TOKEN = os.environ.get("OPENXET_TOKEN", "")
 
 
-def mint_token(scope: str) -> tuple[str, int]:
-    """Mint an OpenXet JWT the same way `openxet-client` does."""
-    exp = int(time.time()) + 3600
-    token = jwt.encode(
-        {"scope": scope, "repo": "demo/repo", "exp": exp}, SECRET, algorithm="HS256"
-    )
-    return token, exp
+def cas_token() -> tuple[str, int]:
+    return TOKEN, int(time.time()) + 3600
 
 
 def main() -> None:
     data = os.urandom(4 * 1024 * 1024)  # 4 MiB of incompressible data
 
-    token, exp = mint_token("write")
+    token, exp = cas_token()
     session = hf_xet.XetSession()
 
     commit = session.new_upload_commit(
@@ -47,7 +44,7 @@ def main() -> None:
     info = handle.result().xet_info
     print(f"uploaded {len(data)} bytes via hf_xet -> file hash {info.hash}")
 
-    token, exp = mint_token("read")
+    token, exp = cas_token()
     with tempfile.TemporaryDirectory() as tmp:
         dest = os.path.join(tmp, "roundtrip.bin")
         with session.new_file_download_group(

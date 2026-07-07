@@ -26,7 +26,6 @@ use std::io::{Read, Write};
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand};
 use hmac::{Hmac, Mac};
-use serde::Serialize;
 use sha2::Sha256;
 
 use openxet_cas_types::chunk::CompressionType;
@@ -53,17 +52,11 @@ struct Cli {
     #[arg(long, env = "OPENXET_URL", default_value = "http://127.0.0.1:8080")]
     url: String,
 
-    /// JWT signing secret (must match the server's OPENXET_AUTH_SECRET).
-    #[arg(
-        long,
-        env = "OPENXET_AUTH_SECRET",
-        default_value = "change-me-in-production"
-    )]
-    secret: String,
-
-    /// Repository id placed in the token claims.
-    #[arg(long, default_value = "demo/repo")]
-    repo: String,
+    /// Bearer token for the server (obtained from your OIDC provider). Optional:
+    /// omit it when the server runs with auth disabled (dev). There is no shared
+    /// secret — real servers authenticate clients via OIDC/JWKS.
+    #[arg(long, env = "OPENXET_TOKEN")]
+    token: Option<String>,
 
     #[command(subcommand)]
     cmd: Command,
@@ -89,24 +82,17 @@ enum Command {
     },
 }
 
-#[derive(Serialize)]
-struct Claims<'a> {
-    scope: &'a str,
-    repo: &'a str,
-    exp: usize,
-}
-
-fn mint_token(secret: &str, scope: &str, repo: &str) -> Result<String> {
-    let exp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)?
-        .as_secs() as usize
-        + 3600;
-    let token = jsonwebtoken::encode(
-        &jsonwebtoken::Header::default(),
-        &Claims { scope, repo, exp },
-        &jsonwebtoken::EncodingKey::from_secret(secret.as_bytes()),
-    )?;
-    Ok(token)
+/// Attach `Authorization: Bearer` only when a token is configured. With none,
+/// requests go out unauthenticated — accepted by a server with auth disabled
+/// (dev), rejected (401) otherwise.
+fn with_token(
+    rb: reqwest::blocking::RequestBuilder,
+    token: Option<&str>,
+) -> reqwest::blocking::RequestBuilder {
+    match token {
+        Some(t) => rb.bearer_auth(t),
+        None => rb,
+    }
 }
 
 fn hmac_chunk(key: &[u8; 32], hash: &MerkleHash) -> [u8; 32] {
@@ -147,7 +133,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
     if data.is_empty() {
         bail!("refusing to upload empty input");
     }
-    let token = mint_token(&cli.secret, "write", &cli.repo)?;
+    let token = cli.token.as_deref();
     let http = reqwest::blocking::Client::new();
 
     // 1. Chunk + hash.
@@ -184,7 +170,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
             cli.url,
             chunk_hashes[i].to_hex()
         );
-        let resp = http.get(&url).bearer_auth(&token).send()?;
+        let resp = with_token(http.get(&url), token).send()?;
         if resp.status().as_u16() == 404 {
             // Not stored anywhere; leave unresolved (becomes a new chunk).
             i += 1;
@@ -246,7 +232,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
             }
             let serialized = serialize_single_chunk(chunk_slices[idx], CompressionType::Lz4)?;
             if !group.is_empty() && group_bytes + serialized.len() > XORB_SOFT_LIMIT {
-                let hash = upload_xorb(&http, &cli.url, &token, &chunk_slices, &group)?;
+                let hash = upload_xorb(&http, &cli.url, token, &chunk_slices, &group)?;
                 for (local_idx, &gi) in group.iter().enumerate() {
                     placement[gi] = Some(Placement {
                         xorb_hash: hash.clone(),
@@ -260,7 +246,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
             group.push(idx);
         }
         if !group.is_empty() {
-            let hash = upload_xorb(&http, &cli.url, &token, &chunk_slices, &group)?;
+            let hash = upload_xorb(&http, &cli.url, token, &chunk_slices, &group)?;
             for (local_idx, &gi) in group.iter().enumerate() {
                 placement[gi] = Some(Placement {
                     xorb_hash: hash.clone(),
@@ -362,9 +348,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
     };
     let shard_bytes = shard.to_upload_bytes()?;
 
-    let resp = http
-        .post(format!("{}/v1/shards", cli.url))
-        .bearer_auth(&token)
+    let resp = with_token(http.post(format!("{}/v1/shards", cli.url)), token)
         .header("content-type", "application/octet-stream")
         .body(shard_bytes)
         .send()?;
@@ -393,7 +377,7 @@ fn cmd_put(cli: &Cli, file: &str, stats: bool) -> Result<()> {
 fn upload_xorb(
     http: &reqwest::blocking::Client,
     base_url: &str,
-    token: &str,
+    token: Option<&str>,
     chunk_slices: &[&[u8]],
     group: &[usize],
 ) -> Result<String> {
@@ -406,12 +390,13 @@ fn upload_xorb(
     }
     let xorb_hash = compute_xorb_hash(&hs).to_hex();
 
-    let resp = http
-        .post(format!("{base_url}/v1/xorbs/default/{xorb_hash}"))
-        .bearer_auth(token)
-        .header("content-type", "application/octet-stream")
-        .body(xorb_bytes)
-        .send()?;
+    let resp = with_token(
+        http.post(format!("{base_url}/v1/xorbs/default/{xorb_hash}")),
+        token,
+    )
+    .header("content-type", "application/octet-stream")
+    .body(xorb_bytes)
+    .send()?;
     if !resp.status().is_success() {
         bail!("xorb upload failed ({}) for {xorb_hash}", resp.status());
     }
@@ -421,13 +406,14 @@ fn upload_xorb(
 // ─── download ──────────────────────────────────────────────────────────────
 
 fn cmd_get(cli: &Cli, hash: &str, out: &str) -> Result<()> {
-    let token = mint_token(&cli.secret, "read", &cli.repo)?;
+    let token = cli.token.as_deref();
     let http = reqwest::blocking::Client::new();
 
-    let resp = http
-        .get(format!("{}/v1/reconstructions/{}", cli.url, hash))
-        .bearer_auth(&token)
-        .send()?;
+    let resp = with_token(
+        http.get(format!("{}/v1/reconstructions/{}", cli.url, hash)),
+        token,
+    )
+    .send()?;
     if !resp.status().is_success() {
         bail!("reconstruction failed ({}) for {hash}", resp.status());
     }
@@ -443,9 +429,7 @@ fn cmd_get(cli: &Cli, hash: &str, out: &str) -> Result<()> {
             .with_context(|| format!("no fetch_info for xorb {}", term.hash))?;
 
         let range = format!("bytes={}-{}", fetch.url_range.start, fetch.url_range.end);
-        let xorb_part = http
-            .get(&fetch.url)
-            .bearer_auth(&token)
+        let xorb_part = with_token(http.get(&fetch.url), token)
             .header("range", range)
             .send()?;
         if !xorb_part.status().is_success() {

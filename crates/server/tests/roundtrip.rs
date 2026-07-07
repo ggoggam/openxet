@@ -137,7 +137,7 @@ async fn test_auth_required_for_cas_endpoints() {
         .unwrap();
     assert_eq!(resp.status(), 401);
 
-    // Read token on write endpoints → 401
+    // Read token on write endpoints → 403 (valid token, insufficient scope)
     let read_token = server.read_token();
 
     let resp = server
@@ -148,7 +148,7 @@ async fn test_auth_required_for_cas_endpoints() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401);
+    assert_eq!(resp.status(), 403);
 
     let resp = server
         .client
@@ -158,7 +158,7 @@ async fn test_auth_required_for_cas_endpoints() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.status(), 401);
+    assert_eq!(resp.status(), 403);
 
     // Read token on read endpoints → should work (404 for missing data, not 401)
     let resp = server
@@ -172,6 +172,68 @@ async fn test_auth_required_for_cas_endpoints() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 404);
+}
+
+/// Malformed hash in the path is 400 on every hash-parameterized endpoint
+/// (spec: "Malformed hash in the path. Fix the path before retrying").
+#[tokio::test]
+async fn test_malformed_hash_is_400() {
+    let server = TestServer::start().await;
+    let bad = "not-a-valid-hash"; // wrong length and non-hex
+
+    // Reconstruction (read)
+    let resp = server
+        .client
+        .get(format!("{}/v1/reconstructions/{bad}", server.base_url))
+        .bearer_auth(server.read_token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Dedup (read)
+    let resp = server
+        .client
+        .get(format!(
+            "{}/v1/chunks/default-merkledb/{bad}",
+            server.base_url
+        ))
+        .bearer_auth(server.read_token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+
+    // Xorb upload (write)
+    let resp = server
+        .client
+        .post(format!("{}/v1/xorbs/default/{bad}", server.base_url))
+        .bearer_auth(server.write_token())
+        .body(vec![0u8; 8])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 400);
+}
+
+/// Oversized uploads return 413 Payload Too Large. (The HF spec documents this
+/// as a 400, but we return the semantically correct HTTP status; xet-core
+/// treats both as non-retryable 4xx.)
+#[tokio::test]
+async fn test_oversized_upload_is_413() {
+    let server = TestServer::start().await;
+    let token = server.write_token();
+    let body = vec![0u8; 64 * 1024 * 1024 + 1]; // MAX_SHARD_SIZE + 1
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/shards", server.base_url))
+        .bearer_auth(&token)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 413);
 }
 
 /// Shard upload with non-zero footer_size is rejected.

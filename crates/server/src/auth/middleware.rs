@@ -135,8 +135,9 @@ async fn authorize(parts: &Parts, state: &AppState, required: Scope) -> Result<C
     let token = extract_bearer_token(parts)?.to_string();
     let claims = verify_token(state, &token).await?;
 
+    // HF xet spec: valid token with insufficient scope is 403, not 401.
     if !claims.scope.satisfies(required) {
-        return Err(AppError::Unauthorized(format!(
+        return Err(AppError::Forbidden(format!(
             "insufficient scope: {} required",
             match required {
                 Scope::Read => "read",

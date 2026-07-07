@@ -17,12 +17,12 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { uploadFile, type UploadResult } from "@/lib/api";
-import { useSecret } from "@/lib/auth";
+import { useToken } from "@/lib/auth";
 import { addToCatalog } from "@/lib/catalog";
 import { formatBytes } from "@/lib/format";
 
 export function UploadPage() {
-  const secret = useSecret();
+  const token = useToken();
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [progress, setProgress] = useState<{
@@ -100,13 +100,12 @@ export function UploadPage() {
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          {!secret && (
+          {!token && (
             <div className="flex items-center gap-2 rounded-md border border-amber-500/50 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400">
               <KeyRound className="size-4 shrink-0" />
-              Uploads need a write token. Paste the server's{" "}
-              <code className="font-mono">OPENXET_AUTH_SECRET</code> into the
-              key field in the header (the dev default is{" "}
-              <code className="font-mono">change-me-in-production</code>).
+              No bearer token set — uploads work against a dev server (auth
+              disabled). For an auth-enabled server, paste an access token from
+              your OIDC provider into the key field in the header.
             </div>
           )}
 
@@ -159,7 +158,7 @@ export function UploadPage() {
                 <Button
                   size="sm"
                   onClick={handleSubmit}
-                  disabled={mutation.isPending || !secret}
+                  disabled={mutation.isPending}
                 >
                   {mutation.isPending ? (
                     "Uploading..."

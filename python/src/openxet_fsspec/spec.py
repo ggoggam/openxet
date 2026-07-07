@@ -21,7 +21,7 @@ Usage:
     fs = XetFileSystem(
         forge_url="http://localhost:3000/api/v1", flavor="gitea",
         owner="xet", repo="my-dataset", ref="main", forge_auth=("xet", "pass"),
-        cas_url="http://localhost:8080", cas_secret="...",
+        cas_url="http://localhost:8080", cas_token=None,
     )
     fs.pipe_file("data/blob.bin", b"...")     # upload bytes, commit pointer
     fs.cat_file("data/blob.bin")              # resolve pointer, download bytes
@@ -81,7 +81,6 @@ class XetFileSystem(AsyncFileSystem):
         forge_auth=None,
         flavor="github",
         cas_url="http://127.0.0.1:8080",
-        cas_secret=None,
         cas_token=None,
         commit_message=None,
         **kwargs,
@@ -96,9 +95,7 @@ class XetFileSystem(AsyncFileSystem):
             auth=forge_auth,
             flavor=flavor,
         )
-        self.cas = CasClient(
-            cas_url, secret=cas_secret, token=cas_token, repo=f"{owner}/{repo}"
-        )
+        self.cas = CasClient(cas_url, token=cas_token, repo=f"{owner}/{repo}")
         self.commit_message = commit_message or "openxet-fsspec"
         if not self.asynchronous:
             # async instances own their loop: call `await fs._close()` instead

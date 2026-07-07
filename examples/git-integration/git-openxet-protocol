@@ -14,7 +14,7 @@
 #
 # Configuration (env):
 #     OPENXET_URL          CAS base URL            (default http://127.0.0.1:8080)
-#     OPENXET_AUTH_SECRET  JWT secret; MUST match the server
+#     OPENXET_TOKEN        OIDC bearer token; optional (dev server ignores it)
 #     OPENXET_CLIENT       path to openxet-client  (default: `openxet-client` on PATH)
 #
 # Requirements: bash, the openxet-client binary (cargo build -p openxet-client).
