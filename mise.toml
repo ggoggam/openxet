@@ -37,8 +37,14 @@ alias = "log"
 description = "Bring up only the RustFS (S3) service, for a host-run server"
 # Starts just the storage services (not the dockerized openxet, which would
 # collide on :8080 with a host-run `dev:s3`).
-run = "docker compose -f docker/compose.rustfs.yaml up -d --build rustfs rustfs-init"
+run = "docker compose -f docker/compose.rustfs.yaml up -d --build rustfs rustfs-init postgres"
 alias = "rustfs"
+
+[tasks."rustfs:down"]
+description = "Bring down the RustFS (S3) service"
+# Starts just the storage services (not the dockerized openxet, which would
+# collide on :8080 with a host-run `dev:s3`).
+run = "docker compose -f docker/compose.rustfs.yaml down --remove-orphans"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -145,6 +151,7 @@ run = "cargo run --bin openxet-server"
 [tasks."dev:s3"]
 description = "Run the server against RustFS (S3) so reconstruction returns presigned URLs"
 depends = ["build", "fe:build", "rustfs:up"]
+depends_post = ["rustfs:down"]
 run = "cargo run --bin openxet-server"
 # Endpoint is localhost:9000 (not rustfs:9000): the server runs on the host, so
 # the presigned URLs it mints must be reachable from the host too. The

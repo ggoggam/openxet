@@ -98,11 +98,32 @@ pub async fn get_dedup(
     let mut cas_info_blocks = Vec::new();
 
     for xorb_hash_hex in xorb_map.keys() {
-        let xorb_data = state.storage.get_xorb(xorb_hash_hex).await?;
-        let chunk_info = parse_xorb_chunk_hashes(&xorb_data);
-
         let xorb_hash = MerkleHash::from_hex(xorb_hash_hex)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("bad stored hash: {e}")))?;
+
+        // Prefer the recorded layout (no object-store fetch, no decompression);
+        // fall back to reading the xorb for entries stored before layouts were
+        // recorded. Both yield (chunk_hash, byte_offset, uncompressed_size).
+        let (chunk_info, num_bytes_on_disk): (Vec<(MerkleHash, u32, u32)>, u32) =
+            match state.chunk_index.get_xorb_layout(xorb_hash_hex).await? {
+                Some(layout) => {
+                    let mut byte_offset = 0u32;
+                    let mut info = Vec::with_capacity(layout.chunks.len());
+                    for chunk in &layout.chunks {
+                        let ch = MerkleHash::from_hex(&chunk.chunk_hash).map_err(|e| {
+                            AppError::Internal(anyhow::anyhow!("bad stored chunk hash: {e}"))
+                        })?;
+                        info.push((ch, byte_offset, chunk.unpacked_size));
+                        byte_offset += chunk.unpacked_size;
+                    }
+                    (info, layout.num_bytes_on_disk)
+                }
+                None => {
+                    let xorb_data = state.storage.get_xorb(xorb_hash_hex).await?;
+                    let on_disk = xorb_data.len() as u32;
+                    (parse_xorb_chunk_hashes(&xorb_data), on_disk)
+                }
+            };
 
         let total_uncompressed: u32 = chunk_info.iter().map(|(_, _, size)| size).sum();
 
@@ -121,7 +142,7 @@ pub async fn get_dedup(
                 cas_flags: 0,
                 num_entries: entries.len() as u32,
                 num_bytes_in_cas: total_uncompressed,
-                num_bytes_on_disk: xorb_data.len() as u32,
+                num_bytes_on_disk,
             },
             entries,
         });

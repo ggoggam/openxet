@@ -31,6 +31,23 @@ services:
       exit 0;
       "
 
+  postgres:
+    image: postgres:16-alpine
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: openxet
+      POSTGRES_PASSWORD: openxet
+      POSTGRES_DB: openxet
+    volumes:
+      - .pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openxet -d openxet"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   openxet:
     build:
       context: ..
@@ -40,6 +57,8 @@ services:
     depends_on:
       rustfs-init:
         condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
     volumes:
       - .data:/.data
     environment:
@@ -56,6 +75,10 @@ services:
       OPENXET_S3_ACCESS_KEY_ID: rustfsadmin
       OPENXET_S3_SECRET_ACCESS_KEY: rustfsadmin
       OPENXET_S3_ALLOW_HTTP: "true"
+      # Shared index so the server can scale to multiple replicas; tables are
+      # created on startup.
+      OPENXET_INDEX_BACKEND: postgres
+      OPENXET_POSTGRES_URL: postgres://openxet:openxet@postgres:5432/openxet
     healthcheck:
       # /v1/shards answers 405 to GET; any HTTP response means the server is up
       test:
