@@ -48,6 +48,11 @@ interface DuckDBQueryOptions {
   bytes: Uint8Array;
 }
 
+// Unique per registration: the singleton DuckDB instance caches state by
+// filename, so reusing "data.parquet" across files reads new bytes with the
+// previous file's metadata (Snappy "uncompressed size mismatch").
+let fileSeq = 0;
+
 function useDuckDBQuery({ format, bytes }: DuckDBQueryOptions) {
   const [result, setResult] = useState<QueryResult | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +64,7 @@ function useDuckDBQuery({ format, bytes }: DuckDBQueryOptions) {
 
   useEffect(() => {
     let cancelled = false;
+    const filename = `data-${++fileSeq}.${format}`;
 
     (async () => {
       try {
@@ -66,8 +72,6 @@ function useDuckDBQuery({ format, bytes }: DuckDBQueryOptions) {
         const conn = await db.connect();
         connRef.current = conn;
 
-        const filename =
-          format === "parquet" ? "data.parquet" : `data.${format}`;
         await db.registerFileBuffer(filename, bytes);
 
         let viewSql: string;
@@ -97,6 +101,7 @@ function useDuckDBQuery({ format, bytes }: DuckDBQueryOptions) {
       connRef.current?.close();
       connRef.current = null;
       readyRef.current = false;
+      getDuckDB().then((db) => db.dropFile(filename)).catch(() => {});
     };
   }, [bytes, format]);
 

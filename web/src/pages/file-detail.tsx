@@ -612,33 +612,36 @@ export function FileDetailPage() {
 
           <div>
             <h2 className="mb-3 text-lg font-semibold">Fetch Info</h2>
-            <div className="space-y-3">
-              {Object.entries(data.reconstruction.fetch_info).map(
-                ([xorbHash, infos]) => (
-                  <Card key={xorbHash}>
-                    <CardHeader className="pb-2">
-                      <CardDescription className="font-mono text-xs">
-                        {xorbHash}
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
-                      {infos.map((info, i) => (
-                        <div
-                          key={i}
-                          className="flex items-center gap-4 text-sm"
-                        >
-                          <Badge variant="outline">
-                            chunks [{info.range.start}, {info.range.end})
-                          </Badge>
-                          <span className="text-muted-foreground">
-                            bytes {info.url_range.start}–{info.url_range.end}
-                          </span>
-                        </div>
-                      ))}
-                    </CardContent>
-                  </Card>
-                ),
-              )}
+            <div className="rounded-md border">
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Xorb Hash</TableHead>
+                    <TableHead>Chunk Range</TableHead>
+                    <TableHead className="text-right">Byte Range</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {Object.entries(data.reconstruction.fetch_info).flatMap(
+                    ([xorbHash, infos]) =>
+                      infos.map((info, i) => (
+                        <TableRow key={`${xorbHash}-${i}`}>
+                          <TableCell className="font-mono text-sm">
+                            {truncateHash(xorbHash, 12)}
+                          </TableCell>
+                          <TableCell>
+                            <Badge variant="outline">
+                              [{info.range.start}, {info.range.end})
+                            </Badge>
+                          </TableCell>
+                          <TableCell className="text-right text-muted-foreground">
+                            {info.url_range.start}–{info.url_range.end}
+                          </TableCell>
+                        </TableRow>
+                      )),
+                  )}
+                </TableBody>
+              </Table>
             </div>
           </div>
         </>
