@@ -6,7 +6,7 @@
 //! chunking/hashing/cas-types crates — the same code the server validates
 //! against — so browser uploads are wire-compatible by construction.
 //!
-//! Upload is a two-phase session (mirroring `openxet-client`'s put pipeline):
+//! Upload is a two-phase session (following the Xet put protocol):
 //!
 //! 1. `UploadSession::new(data)` chunks + hashes. JS then drives the global
 //!    dedup loop: `next_query_hash()` → `GET /v1/chunks/default-merkledb/{h}`
@@ -222,7 +222,7 @@ impl UploadSession {
 }
 
 /// Pack new chunks into xorbs, coalesce placements into reconstruction terms,
-/// and build the upload shard. Mirrors `openxet-client`'s put steps 3–4.
+/// and build the upload shard (the final steps of the Xet put protocol).
 fn build_plan(
     data: Vec<u8>,
     ranges: Vec<(usize, usize)>,
