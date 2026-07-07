@@ -4,7 +4,7 @@
 pub enum CompressionType {
     /// No compression — data stored as-is.
     None = 0,
-    /// Standard LZ4 block compression.
+    /// Standard LZ4 compression (frame format on the wire, not raw blocks).
     Lz4 = 1,
     /// Byte grouping with 4-byte groups followed by LZ4 compression.
     ByteGrouping4Lz4 = 2,
@@ -296,5 +296,15 @@ mod tests {
         let compressed = compress_chunk(data, CompressionType::Lz4);
         let decompressed = decompress_chunk(&compressed, CompressionType::Lz4, data.len()).unwrap();
         assert_eq!(decompressed, data);
+    }
+
+    #[test]
+    fn test_lz4_output_is_frame_format() {
+        // xet-core reads LZ4 chunks as *frame* format (the reference xorb it
+        // produced decodes with a frame decoder). Switching to raw block
+        // compression would silently break interop while our own roundtrip
+        // tests still pass — pin the frame magic.
+        let compressed = compress_chunk(b"hello world hello world", CompressionType::Lz4);
+        assert_eq!(&compressed[..4], &0x184D2204u32.to_le_bytes());
     }
 }
