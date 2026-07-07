@@ -10,7 +10,7 @@ services:
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
-      - rustfs-data:/data
+      - .rustfs:/data
 
   rustfs-init:
     image: amazon/aws-cli:latest
@@ -58,11 +58,16 @@ services:
       OPENXET_S3_ALLOW_HTTP: "true"
     healthcheck:
       # /v1/shards answers 405 to GET; any HTTP response means the server is up
-      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/v1/shards"]
+      test:
+        [
+          "CMD",
+          "curl",
+          "-s",
+          "-o",
+          "/dev/null",
+          "http://localhost:8080/v1/shards",
+        ]
       interval: 10s
       timeout: 5s
       retries: 3
       start_period: 5s
-
-volumes:
-  rustfs-data:

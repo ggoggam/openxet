@@ -130,6 +130,10 @@ checksum = "sha256:1ee0d2b210acc805e0ccd1b00fa84eb1d0d939f1a79da37ae9f432e1c16c5
 url = "https://github.com/j178/prek/releases/download/v0.4.5/prek-x86_64-pc-windows-msvc.zip"
 provenance = "github-attestations"
 
+[[tools.rust]]
+version = "1.96.0"
+backend = "core:rust"
+
 [[tools.uv]]
 version = "0.11.23"
 backend = "aqua:astral-sh/uv"

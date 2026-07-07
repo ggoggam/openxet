@@ -369,10 +369,12 @@ pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<
             .and_then(|v| v.iter().find(|f| f.range.contains_range(&term.range)))
             .unwrap_or_else(|| panic!("no fetch_info for xorb {}", term.hash));
 
+        // xet-core fetches fetch_info URLs without any Authorization header
+        // (they are presigned / self-authenticating), so we deliberately don't
+        // attach one here.
         let resp = server
             .client
             .get(&fetch.url)
-            .bearer_auth(&token)
             .header(
                 "range",
                 format!("bytes={}-{}", fetch.url_range.start, fetch.url_range.end),

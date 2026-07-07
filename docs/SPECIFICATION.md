@@ -66,7 +66,7 @@ Retrieve file reconstruction metadata for downloading a file.
 **Implementation notes:**
 - Look up file_id in the file index → find the shard containing this file's reconstruction
 - Deserialize the shard's FileInfo section to build the terms list
-- For each xorb referenced in the terms, generate a presigned URL (or direct URL with auth) pointing to the xorb data with the correct byte range
+- For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own public `/v1/xorbs/default/{hash}` route. Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
 - For range requests: compute which terms/chunks overlap the requested byte range, set `offset_into_first_range` accordingly, trim terms
 
 ### 3.2 GET /v1/chunks/default-merkledb/{hash}
@@ -264,15 +264,17 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
   allow-listed in `auth.oidc_issuers`; `auth.oidc_audience` optionally pins
   `aud`. Any valid token from an allowed issuer currently grants full
   read/write — issuance is the access-control point.
-- **Fetch-URL tokens** (`?token=` on reconstruction `fetch_info` URLs, the
-  presigned-URL analog) are self-minted HS256 JWTs with claims
-  `scope`/`repo`/`exp`, signed with a random per-process secret that never
-  leaves the server.
+- **Fetch URLs** on reconstruction `fetch_info` entries are self-authenticating
+  and carry no OpenXet credential: cloud backends return a presigned
+  object-store URL, and the filesystem backend returns the server's own
+  **unauthenticated** `GET /v1/xorbs/default/{hash}` route (content-addressed
+  hash is the only handle). The server no longer mints fetch-URL tokens.
 - **Development:** `auth.enabled = false` (or `OPENXET_AUTH_ENABLED=false`)
   skips all token checks; the server logs a loud warning.
 
-Write scope supersedes read; middleware validates the Bearer token (or `token`
-query parameter) on all `/v1/*` routes.
+Write scope supersedes read; middleware validates the Bearer `Authorization`
+header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` is the one
+unauthenticated route (the filesystem fetch-URL fallback).
 
 ---
 
@@ -286,6 +288,8 @@ trait StorageBackend: Send + Sync {
     async fn get_xorb(&self, hash: &str) -> Result<Bytes>;
     async fn get_xorb_range(&self, hash: &str, start: u64, end: u64) -> Result<Bytes>;
     async fn put_xorb(&self, hash: &str, data: Bytes) -> Result<bool>; // true = inserted
+    // Some(url) for cloud backends; None for the filesystem (can't presign).
+    async fn presigned_xorb_url(&self, hash: &str, expires_in: Duration) -> Result<Option<String>>;
     async fn xorb_exists(&self, hash: &str) -> Result<bool>;
     async fn get_shard(&self, hash: &str) -> Result<Bytes>;
     async fn put_shard(&self, hash: &str, data: Bytes) -> Result<bool>;
@@ -308,9 +312,13 @@ trait StorageBackend: Send + Sync {
         └── {chunk_hash}     # → (xorb_hash, chunk_index) JSON
 ```
 
-### S3 Backend (Optional/Future)
+### Cloud Backends (S3 / GCS / Azure)
 
-Same key structure, uses `aws-sdk-s3` with presigned URL generation for fetch_info URLs.
+Same key structure, routed through the `object_store` crate. For `fetch_info`
+URLs the backend mints a presigned GET URL via `object_store`'s `Signer`, so
+clients download xorb bytes directly from object storage and the server stays
+out of the data path. (SigV4 presigned GETs don't sign the `Range` header, so
+ranged fetches still work.)
 
 ---
 
@@ -397,7 +405,7 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 rou
 11. Auth middleware (JWT generation + validation)
 12. `POST /v1/xorbs/default/{hash}` — xorb upload with validation
 13. `POST /v1/shards` — shard upload with xorb existence checks and verification hash validation
-14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned/direct URLs
+14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned (cloud) / public-route (filesystem) fetch URLs
 15. `GET /v1/chunks/default-merkledb/{hash}` — global dedup with HMAC-protected shard responses
 16. Error handling (retryable vs non-retryable), rate limiting
 

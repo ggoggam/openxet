@@ -8,26 +8,22 @@ use crate::state::AppState;
 
 use super::jwt::{Claims, Scope, validate_token};
 
-/// Extract the token from the Authorization header, or from a `token` query
-/// parameter. The query form is the presigned-URL analog used by the
-/// reconstruction response's fetch_info URLs: xet-core fetches those URLs
-/// without attaching any Authorization header (on huggingface.co they are
-/// presigned S3 URLs), so the URL itself must carry the credential.
+/// Extract the bearer token from the `Authorization` header.
+///
+/// Fetch URLs in reconstruction responses are self-authenticating (presigned
+/// object-store URLs, or the unauthenticated filesystem fallback route), so the
+/// server no longer accepts a credential via a `?token=` query parameter.
 fn extract_bearer_token(parts: &Parts) -> Result<&str, AppError> {
-    if let Some(header) = parts.headers.get("authorization") {
-        let header = header
-            .to_str()
-            .map_err(|_| AppError::Unauthorized("invalid authorization header".to_string()))?;
-        return header.strip_prefix("Bearer ").ok_or_else(|| {
-            AppError::Unauthorized("invalid authorization header format".to_string())
-        });
-    }
-
-    parts
-        .uri
-        .query()
-        .and_then(|q| q.split('&').find_map(|kv| kv.strip_prefix("token=")))
-        .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))
+    let header = parts
+        .headers
+        .get("authorization")
+        .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))?;
+    let header = header
+        .to_str()
+        .map_err(|_| AppError::Unauthorized("invalid authorization header".to_string()))?;
+    header
+        .strip_prefix("Bearer ")
+        .ok_or_else(|| AppError::Unauthorized("invalid authorization header format".to_string()))
 }
 
 /// Minimal claims decoded from an OIDC (e.g. Keycloak) token. Signature,
@@ -73,9 +69,9 @@ fn unverified_issuer(token: &str, alg: Algorithm) -> Result<String, AppError> {
 }
 
 /// Verify a bearer token and return its OpenXet claims. HS256 tokens are
-/// checked against the server's per-process fetch-token secret (the
-/// self-minted presigned-URL path — clients never hold this secret).
-/// Asymmetric tokens are verified against the issuing OIDC provider's JWKS.
+/// checked against the server's symmetric secret (used by tests and
+/// trusted/dev setups; clients never hold this secret). Asymmetric tokens are
+/// verified against the issuing OIDC provider's JWKS.
 async fn verify_token(state: &AppState, token: &str) -> Result<Claims, AppError> {
     let header =
         decode_header(token).map_err(|e| AppError::Unauthorized(format!("invalid token: {e}")))?;

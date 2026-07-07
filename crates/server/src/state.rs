@@ -11,11 +11,10 @@ pub struct AppState {
     pub chunk_index: Arc<RocksDbChunkIndex>,
     pub config: Arc<AppConfig>,
     pub jwks: Arc<JwksCache>,
-    /// Secret for the server's self-minted short-lived fetch-URL tokens
-    /// (reconstruction responses). Generated randomly at startup and never
-    /// shared with clients — external clients authenticate via OIDC only.
-    // ponytail: per-process secret; a restart invalidates in-flight fetch URLs
-    // and multi-replica deployments need sticky routing. Make it configurable
-    // if either bites.
+    /// Secret used to verify symmetric (HS256) bearer tokens. Generated randomly
+    /// at startup and never shared with clients — external clients authenticate
+    /// via OIDC only. In production nothing mints against it (fetch URLs are now
+    /// presigned / unauthenticated); it backs the HS256 path used by tests and
+    /// trusted/dev setups.
     pub fetch_token_secret: Arc<str>,
 }

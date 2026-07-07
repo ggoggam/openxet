@@ -141,7 +141,6 @@ fn build_xorb_with_footer(
 async fn reconstruct_file_from_response(
     client: &reqwest::Client,
     recon: &QueryReconstructionResponse,
-    token: &str,
 ) -> Vec<u8> {
     let mut result = Vec::new();
 
@@ -162,10 +161,10 @@ async fn reconstruct_file_from_response(
                 )
             });
 
-        // xet-core fetches the xorb byte range using the url and url_range
+        // xet-core fetches the xorb byte range using the url and url_range, with
+        // no Authorization header (the url is presigned / self-authenticating).
         let resp = client
             .get(&fi.url)
-            .bearer_auth(token)
             .header(
                 "Range",
                 format!("bytes={}-{}", fi.url_range.start, fi.url_range.end),
@@ -346,8 +345,7 @@ async fn test_xetcore_xorb_with_cas_object_footer() {
     assert!(!recon.terms.is_empty());
 
     // Verify we can reconstruct the full file from the response
-    let reconstructed =
-        reconstruct_file_from_response(&server.client, &recon, &server.read_token()).await;
+    let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
     assert_eq!(
         reconstructed.len(),
         data.len(),
@@ -424,7 +422,7 @@ async fn test_xetcore_full_roundtrip_large_file() {
     }
 
     // Reconstruct (simulating xet-core client)
-    let reconstructed = reconstruct_file_from_response(&server.client, &recon, &read_token).await;
+    let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
     assert_eq!(reconstructed.len(), data.len());
     assert_eq!(reconstructed, data);
 }
@@ -730,7 +728,7 @@ async fn test_xetcore_large_file_multi_xorb() {
     let recon: QueryReconstructionResponse = resp.json().await.unwrap();
 
     // Reconstruct and verify
-    let reconstructed = reconstruct_file_from_response(&server.client, &recon, &read_token).await;
+    let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
     assert_eq!(reconstructed.len(), data.len());
     assert_eq!(reconstructed, data);
 }
@@ -845,10 +843,10 @@ async fn test_xetcore_fetch_info_url_range_with_footer() {
     // For each fetch_info entry, verify the url_range points to parseable chunk data
     for (xorb_hash, infos) in &recon.fetch_info {
         for info in infos {
+            // Fetched without an Authorization header, as xet-core does.
             let resp = server
                 .client
                 .get(&info.url)
-                .bearer_auth(&read_token)
                 .header(
                     "Range",
                     format!("bytes={}-{}", info.url_range.start, info.url_range.end),

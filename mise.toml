@@ -10,6 +10,7 @@ uv = "latest"
 prek = "latest"
 "github:rustwasm/wasm-pack" = "latest"
 "cargo:cargo-nextest" = "latest"
+rust = "latest"
 
 [tasks."pre-commit"]
 description = "Run pre-commit checks via prek"
@@ -32,17 +33,12 @@ description = "View docker logs"
 run = "docker compose -f docker/compose.rustfs.yaml logs --tail 100"
 alias = "log"
 
-[tasks."gitea:up"]
-description = "Bring up the gitea + openxet + rustfs stack"
-run = "docker compose -f docker/compose.gitea.yaml up -d --build --force-recreate --remove-orphans"
-
-[tasks."gitea:down"]
-description = "Bring down the gitea stack (add -- -v to drop volumes)"
-run = "docker compose -f docker/compose.gitea.yaml down --remove-orphans"
-
-[tasks."gitea:log"]
-description = "View gitea stack logs"
-run = "docker compose -f docker/compose.gitea.yaml logs --tail 100"
+[tasks."rustfs:up"]
+description = "Bring up only the RustFS (S3) service, for a host-run server"
+# Starts just the storage services (not the dockerized openxet, which would
+# collide on :8080 with a host-run `dev:s3`).
+run = "docker compose -f docker/compose.rustfs.yaml up -d --build rustfs rustfs-init"
+alias = "rustfs"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -142,9 +138,18 @@ dir = "web"
 # ── Run ───────────────────────────────────────────────────────────────────────
 
 [tasks.dev]
-description = "Run the server in debug mode"
+description = "Run the server in debug mode (filesystem backend)"
 depends = ["build", "fe:build"]
 run = "cargo run --bin openxet-server"
+
+[tasks."dev:s3"]
+description = "Run the server against RustFS (S3) so reconstruction returns presigned URLs"
+depends = ["build", "fe:build", "rustfs:up"]
+run = "cargo run --bin openxet-server"
+# Endpoint is localhost:9000 (not rustfs:9000): the server runs on the host, so
+# the presigned URLs it mints must be reachable from the host too. The
+# port-mapped RustFS makes localhost:9000 work for both server and client.
+env = { OPENXET_STORAGE_BACKEND = "s3", OPENXET_S3_BUCKET = "openxet", OPENXET_S3_REGION = "us-east-1", OPENXET_S3_ENDPOINT = "http://localhost:9000", OPENXET_S3_ACCESS_KEY_ID = "rustfsadmin", OPENXET_S3_SECRET_ACCESS_KEY = "rustfsadmin", OPENXET_S3_ALLOW_HTTP = "true" }
 
 [tasks.clean]
 description = "Clean build artifacts"

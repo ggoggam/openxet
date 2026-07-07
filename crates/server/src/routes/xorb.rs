@@ -8,7 +8,7 @@ use serde::Serialize;
 use openxet_cas_types::xorb::{MAX_XORB_SIZE, compute_xorb_hash, deserialize_xorb};
 use openxet_hashing::{MerkleHash, compute_chunk_hash};
 
-use crate::auth::{RequireRead, RequireWrite};
+use crate::auth::RequireWrite;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::storage::index::ChunkLocation;
@@ -85,14 +85,25 @@ pub async fn post_xorb(
 
 /// GET /xorbs/default/{hash} — download xorb data with optional Range header.
 ///
-/// xet-core's download flow fetches xorb data from the URLs provided in
-/// the reconstruction response's fetch_info entries.
+/// xet-core's download flow fetches xorb data from the URLs in the
+/// reconstruction response's fetch_info entries **without** an Authorization
+/// header (it treats them like presigned URLs). This route is therefore the
+/// unauthenticated fallback used only when the storage backend can't presign
+/// (local filesystem); cloud backends hand out presigned URLs that bypass this
+/// route entirely, so on those backends this route serves nothing and 404s.
 pub async fn get_xorb(
     State(state): State<AppState>,
-    _auth: RequireRead,
     Path(hash): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
+    // On presign-capable backends clients fetch directly from object storage;
+    // this route is only the filesystem fallback, so refuse to serve otherwise.
+    if state.storage.supports_presigned_urls() {
+        return Err(AppError::NotFound(format!(
+            "xorb download not served by this backend: {hash}"
+        )));
+    }
+
     validate_hash(&hash)?;
 
     if let Some(range_val) = headers.get("range") {
