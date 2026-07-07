@@ -50,16 +50,14 @@ mechanism Git LFS — and HuggingFace's Xet — use to keep large bytes out of g
 
 - `.gitattributes` declares `*.bin filter=openxet -text`.
 - **clean** (on `git add`): the real file bytes are uploaded to OpenXet over the
-  `/v1` Xet wire protocol (`openxet-client put`) and git stores only a tiny
-  **pointer file**:
+  `/v1` Xet wire protocol and git stores only a tiny **pointer file**:
   ```
   version https://openxet/spec/v1
   xet-file-hash <64-hex>
   size <bytes>
   ```
 - **smudge** (on `git checkout`): the pointer is read back, the bytes are fetched
-  from OpenXet via CAS reconstruction (`openxet-client get`), and the working
-  tree gets the real file.
+  from OpenXet via CAS reconstruction, and the working tree gets the real file.
 
 The demo commits a 20 MiB file (a *single* xorb), shows git stored a 118-byte
 pointer (not the data), appends 1 MiB and commits again, and confirms the second
@@ -85,8 +83,7 @@ web UI. The bytes are swapped in/out by the client:
 Our `git-openxet-protocol` filter plays the role of the Xet-aware client,
 against the OpenXet CAS instead of the HuggingFace Hub.
 
-Under the hood `git-openxet-protocol` shells out to `openxet-client`
-(`crates/client`), a reference Xet protocol client that:
+Under the hood `git-openxet-protocol` implements the Xet protocol client:
 
 1. content-defined chunks the file and hashes each chunk;
 2. queries `GET /v1/chunks/default-merkledb/{hash}` to find which chunks already
@@ -96,11 +93,7 @@ Under the hood `git-openxet-protocol` shells out to `openxet-client`
    both the new and the pre-existing xorbs;
 
 and on download fetches `GET /v1/reconstructions/{file_id}`, pulls the byte
-ranges in `fetch_info`, and concatenates the decompressed chunks. It reuses the
-workspace's own hashing/chunking/cas-types crates, so it is wire-compatible with
-the server by construction. Build it with `cargo build -p openxet-client`; pass
-a bearer token via `--token`/`OPENXET_TOKEN` for an auth-enabled server, or omit
-it against a dev server with auth disabled.
+ranges in `fetch_info`, and concatenates the decompressed chunks.
 
 ## How OpenXet works as a dataset VCS
 
@@ -140,9 +133,7 @@ containing only the *new* chunks, uploads them, and then registers a shard whose
 file reconstruction references chunks across both new and pre-existing xorbs.
 OpenXet implements all of these `/v1/*` endpoints (see
 [`docs/SPECIFICATION.md`](../docs/SPECIFICATION.md) and the
-`crates/server/tests/xetcore_compat.rs` integration test), and this repo ships a
-reference client that drives them — `openxet-client` (`crates/client`), used by
-the `git-openxet-protocol` filter above to get real chunk-level dedup.
+`crates/server/tests/xetcore_compat.rs` integration test).
 
 ### Using a real Xet client
 
