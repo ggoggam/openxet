@@ -11,7 +11,9 @@ services:
       - OPENXET_HOST=0.0.0.0
       - OPENXET_PORT=8080
       - OPENXET_DATA_DIR=/.data
-      - OPENXET_AUTH_SECRET=change-me-in-production
+      # Local demo runs without auth; production should configure OIDC
+      # (OPENXET_OIDC_ISSUERS) instead.
+      - OPENXET_AUTH_ENABLED=false
     healthcheck:
       # /v1/shards answers 405 to GET; any HTTP response means the server is up
       test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/v1/shards"]

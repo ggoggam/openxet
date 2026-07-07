@@ -3,10 +3,6 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::Deserialize;
 
-/// Default auth secret. Tokens signed with this are trivially forgeable, so the
-/// server warns loudly at startup if it is still in use.
-pub const DEFAULT_AUTH_SECRET: &str = "change-me-in-production";
-
 #[derive(Parser, Debug)]
 #[command(name = "openxet-server", about = "OpenXet CAS server")]
 pub struct Cli {
@@ -77,8 +73,26 @@ pub struct StorageConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct AuthConfig {
-    pub secret: String,
+    /// When false, all token checks are skipped and every request is treated
+    /// as authenticated with write scope. Development/trusted-network only.
+    pub enabled: bool,
+
     pub shard_key_ttl_seconds: u64,
+
+    /// Allowed OIDC issuers (e.g. Keycloak realm URLs like
+    /// `https://kc.example.com/realms/myrealm`). Tokens signed with an
+    /// asymmetric algorithm are verified against the issuer's JWKS. This is
+    /// the only way external clients authenticate; with auth enabled and no
+    /// issuers configured, only the server's own self-minted fetch-URL tokens
+    /// are accepted.
+    pub oidc_issuers: Vec<String>,
+
+    /// Expected audience for OIDC tokens. When `None`, the `aud` claim is not
+    /// checked (signature + issuer + expiry are still enforced).
+    pub oidc_audience: Option<String>,
+
+    /// How long a fetched JWKS is trusted before it is refetched, in seconds.
+    pub jwks_ttl_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -115,8 +129,11 @@ impl Default for StorageConfig {
 impl Default for AuthConfig {
     fn default() -> Self {
         Self {
-            secret: DEFAULT_AUTH_SECRET.to_string(),
+            enabled: true,
             shard_key_ttl_seconds: 3600,
+            oidc_issuers: Vec::new(),
+            oidc_audience: None,
+            jwks_ttl_seconds: 900,
         }
     }
 }
@@ -204,13 +221,29 @@ impl AppConfig {
         if let Ok(v) = std::env::var("OPENXET_AZURE_ACCESS_KEY") {
             self.storage.azure_access_key = Some(v);
         }
-        if let Ok(secret) = std::env::var("OPENXET_AUTH_SECRET") {
-            self.auth.secret = secret;
+        if let Ok(enabled) = std::env::var("OPENXET_AUTH_ENABLED") {
+            self.auth.enabled = !(enabled == "false" || enabled == "0");
         }
         if let Ok(ttl) = std::env::var("OPENXET_SHARD_KEY_TTL")
             && let Ok(ttl) = ttl.parse::<u64>()
         {
             self.auth.shard_key_ttl_seconds = ttl;
+        }
+        if let Ok(issuers) = std::env::var("OPENXET_OIDC_ISSUERS") {
+            self.auth.oidc_issuers = issuers
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+        }
+        if let Ok(aud) = std::env::var("OPENXET_OIDC_AUDIENCE") {
+            self.auth.oidc_audience = Some(aud);
+        }
+        if let Ok(ttl) = std::env::var("OPENXET_JWKS_TTL")
+            && let Ok(ttl) = ttl.parse::<u64>()
+        {
+            self.auth.jwks_ttl_seconds = ttl;
         }
     }
 

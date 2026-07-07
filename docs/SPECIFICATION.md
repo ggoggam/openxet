@@ -253,22 +253,26 @@ Optimization: skip hash testing for first (MIN_CHUNK_SIZE - 64 - 1) bytes of eac
 
 ## 5. Authentication Design
 
-### Self-Hosted Token Model
+### Verifier-Only Model
 
-Since this is a standalone server (not HuggingFace Hub), we implement our own token system:
+The server never issues client tokens and holds no shared client secret. Token
+issuance is external (like huggingface.co, where the Hub mints xet tokens):
 
-**Token endpoint:** `POST /auth/token`
-```json
-Request:  { "scope": "read" | "write", "repo": "<repo_id>" }
-Response: { "accessToken": "<jwt>", "exp": <unix_ts>, "casUrl": "<base_url>" }
-```
+- **External clients** present a JWT from an OIDC provider (e.g. Keycloak),
+  signed with an asymmetric algorithm. The server verifies it against the
+  issuer's JWKS (fetched via OIDC discovery and cached). Issuers are
+  allow-listed in `auth.oidc_issuers`; `auth.oidc_audience` optionally pins
+  `aud`. Any valid token from an allowed issuer currently grants full
+  read/write — issuance is the access-control point.
+- **Fetch-URL tokens** (`?token=` on reconstruction `fetch_info` URLs, the
+  presigned-URL analog) are self-minted HS256 JWTs with claims
+  `scope`/`repo`/`exp`, signed with a random per-process secret that never
+  leaves the server.
+- **Development:** `auth.enabled = false` (or `OPENXET_AUTH_ENABLED=false`)
+  skips all token checks; the server logs a loud warning.
 
-- Tokens are JWTs signed with a server-side secret
-- Claims: `scope` (read/write), `repo`, `exp`
-- Write scope supersedes read
-- Middleware validates Bearer token on all `/v1/*` routes
-
-For HuggingFace Hub compatibility, clients can also use tokens obtained from `https://huggingface.co/api/{repo_type}s/{repo_id}/xet-{token_type}-token/{revision}` if the server is configured as a HF-compatible backend.
+Write scope supersedes read; middleware validates the Bearer token (or `token`
+query parameter) on all `/v1/*` routes.
 
 ---
 

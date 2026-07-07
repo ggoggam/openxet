@@ -21,7 +21,6 @@ cd "$REPO_ROOT"
 
 PORT="${OPENXET_DEMO_PORT:-8098}"
 export OPENXET_URL="http://127.0.0.1:${PORT}"
-export OPENXET_AUTH_SECRET="git-xet-demo-secret"
 export OPENXET_CLIENT="$REPO_ROOT/target/release/openxet-client"
 WORK_DIR="$(mktemp -d)"
 DATA_DIR="$WORK_DIR/cas-data"
@@ -48,7 +47,7 @@ cargo build --release --quiet --bin openxet-server --bin openxet-client
 mkdir -p "$DATA_DIR"
 log "Launching OpenXet on $OPENXET_URL"
 OPENXET_HOST=127.0.0.1 OPENXET_PORT="$PORT" OPENXET_DATA_DIR="$DATA_DIR" \
-OPENXET_STORAGE_BACKEND=filesystem OPENXET_AUTH_SECRET="$OPENXET_AUTH_SECRET" \
+OPENXET_STORAGE_BACKEND=filesystem OPENXET_AUTH_ENABLED=false \
   ./target/release/openxet-server >"$WORK_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 for _ in $(seq 1 50); do server_up && break; sleep 0.2; done
