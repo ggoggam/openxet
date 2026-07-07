@@ -5,7 +5,7 @@ use rocksdb::DB;
 
 use super::super::backend::validate_hash;
 use super::super::error::StorageError;
-use super::{ChunkIndex, ChunkLocation, FileIndex};
+use super::{ChunkIndex, ChunkLocation, FileIndex, XorbLayout};
 
 fn rocks_err(e: rocksdb::Error) -> StorageError {
     StorageError::Index(e.to_string())
@@ -21,14 +21,27 @@ fn rocks_err(e: rocksdb::Error) -> StorageError {
 // if p99 handler latency ever shows stalls.
 pub struct RocksDbChunkIndex {
     db: Arc<DB>,
+    /// `xorb_hash → JSON XorbLayout`, kept in its own database so xorb-keyed
+    /// layout lookups don't scan the chunk keyspace.
+    layouts: Arc<DB>,
 }
 
 impl RocksDbChunkIndex {
     pub fn new(data_dir: &Path) -> Result<Self, StorageError> {
-        let path = data_dir.join("index").join("chunks.rocksdb");
-        std::fs::create_dir_all(&path).map_err(|e| StorageError::io(e, &path))?;
-        let db = DB::open_default(&path).map_err(rocks_err)?;
-        Ok(Self { db: Arc::new(db) })
+        let index_dir = data_dir.join("index");
+
+        let chunks_path = index_dir.join("chunks.rocksdb");
+        std::fs::create_dir_all(&chunks_path).map_err(|e| StorageError::io(e, &chunks_path))?;
+        let db = DB::open_default(&chunks_path).map_err(rocks_err)?;
+
+        let layouts_path = index_dir.join("xorb_layouts.rocksdb");
+        std::fs::create_dir_all(&layouts_path).map_err(|e| StorageError::io(e, &layouts_path))?;
+        let layouts = DB::open_default(&layouts_path).map_err(rocks_err)?;
+
+        Ok(Self {
+            db: Arc::new(db),
+            layouts: Arc::new(layouts),
+        })
     }
 
     fn read_locations(&self, chunk_hash: &str) -> Result<Vec<ChunkLocation>, StorageError> {
@@ -66,6 +79,28 @@ impl ChunkIndex for RocksDbChunkIndex {
             }
         }
         self.db.write(batch).map_err(rocks_err)
+    }
+
+    async fn get_xorb_layout(&self, xorb_hash: &str) -> Result<Option<XorbLayout>, StorageError> {
+        validate_hash(xorb_hash)?;
+        match self.layouts.get(xorb_hash.as_bytes()).map_err(rocks_err)? {
+            Some(data) => serde_json::from_slice(&data)
+                .map(Some)
+                .map_err(|e| StorageError::Index(format!("corrupt xorb layout: {e}"))),
+            None => Ok(None),
+        }
+    }
+
+    async fn put_xorb_layout(
+        &self,
+        xorb_hash: &str,
+        layout: XorbLayout,
+    ) -> Result<(), StorageError> {
+        validate_hash(xorb_hash)?;
+        let json = serde_json::to_vec(&layout).map_err(|e| StorageError::Index(e.to_string()))?;
+        self.layouts
+            .put(xorb_hash.as_bytes(), &json)
+            .map_err(rocks_err)
     }
 }
 

@@ -52,6 +52,15 @@ pub struct StorageConfig {
     pub backend: String,
     pub data_dir: PathBuf,
 
+    /// Index backend for the dedup and file→shard indexes: `rocksdb` (default,
+    /// node-local) or `postgres` (shared across replicas). Independent of
+    /// `backend`, which selects where xorb/shard blobs live.
+    pub index_backend: String,
+
+    // Postgres index backend
+    pub postgres_url: Option<String>,
+    pub postgres_max_connections: u32,
+
     // S3 / S3-compatible (e.g. RustFS)
     pub s3_bucket: Option<String>,
     pub s3_region: Option<String>,
@@ -111,6 +120,9 @@ impl Default for StorageConfig {
         Self {
             backend: "filesystem".to_string(),
             data_dir: PathBuf::from("./.data"),
+            index_backend: "rocksdb".to_string(),
+            postgres_url: None,
+            postgres_max_connections: 10,
             s3_bucket: None,
             s3_region: None,
             s3_endpoint: None,
@@ -187,6 +199,17 @@ impl AppConfig {
         }
         if let Ok(backend) = std::env::var("OPENXET_STORAGE_BACKEND") {
             self.storage.backend = backend;
+        }
+        if let Ok(v) = std::env::var("OPENXET_INDEX_BACKEND") {
+            self.storage.index_backend = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_POSTGRES_URL") {
+            self.storage.postgres_url = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_POSTGRES_MAX_CONNECTIONS")
+            && let Ok(v) = v.parse::<u32>()
+        {
+            self.storage.postgres_max_connections = v;
         }
         if let Ok(v) = std::env::var("OPENXET_S3_BUCKET") {
             self.storage.s3_bucket = Some(v);

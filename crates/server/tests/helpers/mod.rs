@@ -22,7 +22,7 @@ use openxet_server::auth::{Claims, Scope, create_token};
 use openxet_server::config::AppConfig;
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
+use openxet_server::storage::{build_index, build_storage};
 
 const TEST_SECRET: &str = "test-secret";
 
@@ -34,6 +34,7 @@ pub struct TestServer {
 }
 
 impl TestServer {
+    #[allow(dead_code)]
     pub async fn start() -> Self {
         Self::start_inner(true).await
     }
@@ -43,7 +44,27 @@ impl TestServer {
         Self::start_inner(false).await
     }
 
+    /// Start a server whose indexes are backed by the Postgres instance at
+    /// `postgres_url`. Used by the Postgres-gated integration test.
+    #[allow(dead_code)]
+    pub async fn start_with_postgres(postgres_url: &str) -> Self {
+        Self::start_configured(true, "rocksdb", Some(postgres_url.to_string())).await
+    }
+
     async fn start_inner(auth_enabled: bool) -> Self {
+        Self::start_configured(auth_enabled, "rocksdb", None).await
+    }
+
+    async fn start_configured(
+        auth_enabled: bool,
+        rocks_index_backend: &str,
+        postgres_url: Option<String>,
+    ) -> Self {
+        let index_backend = if postgres_url.is_some() {
+            "postgres".to_string()
+        } else {
+            rocks_index_backend.to_string()
+        };
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path().join("data");
 
@@ -64,6 +85,8 @@ impl TestServer {
             storage: openxet_server::config::StorageConfig {
                 backend: "filesystem".to_string(),
                 data_dir: data_dir.clone(),
+                index_backend,
+                postgres_url,
                 ..Default::default()
             },
             auth: openxet_server::config::AuthConfig {
@@ -74,8 +97,9 @@ impl TestServer {
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
-        let file_index = Arc::new(RocksDbFileIndex::new(&data_dir).unwrap());
-        let chunk_index = Arc::new(RocksDbChunkIndex::new(&data_dir).unwrap());
+        let (file_index, chunk_index) = build_index(&config.storage).await.unwrap();
+        let file_index = Arc::new(file_index);
+        let chunk_index = Arc::new(chunk_index);
 
         let jwks = Arc::new(openxet_server::auth::JwksCache::new(
             config.auth.oidc_issuers.clone(),

@@ -11,7 +11,7 @@ use openxet_hashing::{MerkleHash, compute_chunk_hash};
 use crate::auth::RequireWrite;
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::storage::index::ChunkLocation;
+use crate::storage::index::{ChunkLocation, XorbChunk, XorbLayout};
 use crate::storage::{ChunkIndex, StorageBackend, validate_hash};
 
 #[derive(Debug, Serialize)]
@@ -61,6 +61,9 @@ pub async fn post_xorb(
         )));
     }
 
+    // On-disk size must be read before `body` is moved into storage.
+    let num_bytes_on_disk = body.len() as u32;
+
     // Store the xorb
     state.storage.put_xorb(&hash, body).await?;
 
@@ -79,6 +82,20 @@ pub async fn post_xorb(
         })
         .collect();
     state.chunk_index.put_batch(entries).await?;
+
+    // Record the xorb layout so dedup responses can be built from the index
+    // instead of re-downloading and decompressing the xorb from storage.
+    let layout = XorbLayout {
+        num_bytes_on_disk,
+        chunks: chunk_hashes_and_sizes
+            .iter()
+            .map(|(chunk_hash, size)| XorbChunk {
+                chunk_hash: chunk_hash.to_hex(),
+                unpacked_size: *size as u32,
+            })
+            .collect(),
+    };
+    state.chunk_index.put_xorb_layout(&hash, layout).await?;
 
     Ok(Json(XorbUploadResponse { was_inserted: true }))
 }

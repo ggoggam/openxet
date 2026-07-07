@@ -10,7 +10,7 @@ use openxet_server::auth::JwksCache;
 use openxet_server::config::{AppConfig, Cli};
 use openxet_server::routes::build_router;
 use openxet_server::state::AppState;
-use openxet_server::storage::{RocksDbChunkIndex, RocksDbFileIndex, build_storage};
+use openxet_server::storage::{build_index, build_storage};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,10 +49,10 @@ async fn main() -> Result<()> {
     );
 
     // Initialize storage
-    let data_dir = config.data_dir();
     let storage = Arc::new(build_storage(&config.storage).await?);
-    let file_index = Arc::new(RocksDbFileIndex::new(data_dir)?);
-    let chunk_index = Arc::new(RocksDbChunkIndex::new(data_dir)?);
+    let (file_index, chunk_index) = build_index(&config.storage).await?;
+    let file_index = Arc::new(file_index);
+    let chunk_index = Arc::new(chunk_index);
 
     let jwks = Arc::new(JwksCache::new(
         config.auth.oidc_issuers.clone(),

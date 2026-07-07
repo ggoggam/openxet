@@ -1,9 +1,15 @@
+pub mod postgres_index;
 pub mod rocksdb_index;
 
+use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::PgPoolOptions;
+
+use crate::config::StorageConfig;
 
 use super::error::StorageError;
 
+pub use postgres_index::{PostgresChunkIndex, PostgresFileIndex};
 pub use rocksdb_index::{RocksDbChunkIndex, RocksDbFileIndex};
 
 /// A location where a chunk can be found: which xorb and at what index within it.
@@ -11,6 +17,28 @@ pub use rocksdb_index::{RocksDbChunkIndex, RocksDbFileIndex};
 pub struct ChunkLocation {
     pub xorb_hash: String,
     pub chunk_index: u32,
+}
+
+/// One chunk within a stored xorb, in xorb order.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XorbChunk {
+    /// 64-hex chunk hash.
+    pub chunk_hash: String,
+    /// Uncompressed size of the chunk in bytes.
+    pub unpacked_size: u32,
+}
+
+/// The recorded layout of a xorb: its on-disk size and its chunks in order.
+///
+/// Persisted at xorb upload so global-dedup responses can be built without
+/// re-downloading the xorb from the object store and decompressing every chunk
+/// to recover its hashes and byte ranges. Byte offsets are the running sum of
+/// `unpacked_size`, so they are recomputed on read rather than stored.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XorbLayout {
+    /// Total compressed size of the xorb as stored (`num_bytes_on_disk`).
+    pub num_bytes_on_disk: u32,
+    pub chunks: Vec<XorbChunk>,
 }
 
 /// Index mapping file hashes to shard hashes.
@@ -63,4 +91,143 @@ pub trait ChunkIndex: Send + Sync {
         &self,
         entries: Vec<(String, ChunkLocation)>,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Look up a xorb's recorded chunk layout, or `None` if it was never stored
+    /// (e.g. a xorb uploaded before layouts were recorded — the dedup handler
+    /// then falls back to reading the xorb from the object store).
+    fn get_xorb_layout(
+        &self,
+        xorb_hash: &str,
+    ) -> impl Future<Output = Result<Option<XorbLayout>, StorageError>> + Send;
+
+    /// Record a xorb's chunk layout for use in dedup responses. Idempotent:
+    /// re-recording the same xorb overwrites with identical data.
+    fn put_xorb_layout(
+        &self,
+        xorb_hash: &str,
+        layout: XorbLayout,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+}
+
+/// A [`FileIndex`] selected at startup from configuration.
+///
+/// The `FileIndex` trait uses `-> impl Future` (RPITIT), which is not
+/// `dyn`-compatible, so we dispatch over a closed set of backends with an enum
+/// rather than `Arc<dyn FileIndex>`.
+pub enum FileIndexBackend {
+    RocksDb(RocksDbFileIndex),
+    Postgres(PostgresFileIndex),
+}
+
+impl FileIndex for FileIndexBackend {
+    async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.get(file_hash).await,
+            Self::Postgres(i) => i.get(file_hash).await,
+        }
+    }
+
+    async fn put(&self, file_hash: &str, shard_hash: &str) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.put(file_hash, shard_hash).await,
+            Self::Postgres(i) => i.put(file_hash, shard_hash).await,
+        }
+    }
+
+    async fn list_all(&self) -> Result<Vec<(String, String)>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.list_all().await,
+            Self::Postgres(i) => i.list_all().await,
+        }
+    }
+}
+
+/// A [`ChunkIndex`] selected at startup from configuration. See
+/// [`FileIndexBackend`] for why this is an enum rather than a trait object.
+pub enum ChunkIndexBackend {
+    RocksDb(RocksDbChunkIndex),
+    Postgres(PostgresChunkIndex),
+}
+
+impl ChunkIndex for ChunkIndexBackend {
+    async fn get(&self, chunk_hash: &str) -> Result<Vec<ChunkLocation>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.get(chunk_hash).await,
+            Self::Postgres(i) => i.get(chunk_hash).await,
+        }
+    }
+
+    async fn put(&self, chunk_hash: &str, location: ChunkLocation) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.put(chunk_hash, location).await,
+            Self::Postgres(i) => i.put(chunk_hash, location).await,
+        }
+    }
+
+    async fn put_batch(&self, entries: Vec<(String, ChunkLocation)>) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.put_batch(entries).await,
+            Self::Postgres(i) => i.put_batch(entries).await,
+        }
+    }
+
+    async fn get_xorb_layout(
+        &self,
+        xorb_hash: &str,
+    ) -> Result<Option<XorbLayout>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.get_xorb_layout(xorb_hash).await,
+            Self::Postgres(i) => i.get_xorb_layout(xorb_hash).await,
+        }
+    }
+
+    async fn put_xorb_layout(
+        &self,
+        xorb_hash: &str,
+        layout: XorbLayout,
+    ) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.put_xorb_layout(xorb_hash, layout).await,
+            Self::Postgres(i) => i.put_xorb_layout(xorb_hash, layout).await,
+        }
+    }
+}
+
+/// Build the file and chunk indexes from configuration.
+///
+/// `rocksdb` (the default) keeps a node-local index and is fine for a single
+/// instance; `postgres` shares one index across replicas so dedup and
+/// reconstruction stay consistent when the server is scaled out. Both indexes
+/// share a single `PgPool` on the Postgres path.
+pub async fn build_index(
+    config: &StorageConfig,
+) -> anyhow::Result<(FileIndexBackend, ChunkIndexBackend)> {
+    match config.index_backend.as_str() {
+        "rocksdb" => {
+            let data_dir = &config.data_dir;
+            let file = RocksDbFileIndex::new(data_dir)?;
+            let chunk = RocksDbChunkIndex::new(data_dir)?;
+            Ok((
+                FileIndexBackend::RocksDb(file),
+                ChunkIndexBackend::RocksDb(chunk),
+            ))
+        }
+        "postgres" => {
+            let url = config
+                .postgres_url
+                .as_deref()
+                .context("postgres_url is required for the postgres index backend")?;
+            let pool = PgPoolOptions::new()
+                .max_connections(config.postgres_max_connections)
+                .connect(url)
+                .await
+                .context("failed to connect to postgres")?;
+            postgres_index::init_schema(&pool).await?;
+            Ok((
+                FileIndexBackend::Postgres(PostgresFileIndex::new(pool.clone())),
+                ChunkIndexBackend::Postgres(PostgresChunkIndex::new(pool)),
+            ))
+        }
+        other => bail!("unknown index backend: {other}"),
+    }
 }
