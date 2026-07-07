@@ -1,6 +1,7 @@
 // Xet wire-protocol client (/v1/*). The server exposes nothing else:
 // uploads are chunked/hashed/packed in the browser (openxet-wasm) and POSTed
-// as xorbs + a shard; downloads go through reconstruction/content endpoints.
+// as xorbs + a shard; downloads fetch the reconstruction plan and reassemble
+// the file client-side from xorb byte ranges (chunk decoding via openxet-wasm).
 
 import { mintToken, type Scope } from "./auth";
 
@@ -78,31 +79,73 @@ export async function fetchFileDetail(hash: string): Promise<FileDetail> {
   return { hash, total_size, reconstruction };
 }
 
-export async function fetchFileContent(hash: string): Promise<ArrayBuffer> {
-  const res = await authFetch(`/v1/content/${hash}`, "read");
-  return res.arrayBuffer();
+/**
+ * Download file bytes the Xet way: fetch the reconstruction plan (Range-aware),
+ * pull each term's xorb byte range from its presigned fetch URL, decode the
+ * chunk frames in wasm, and reassemble.
+ */
+async function reconstructContent(
+  hash: string,
+  range?: { start: number; end: number },
+): Promise<ArrayBuffer> {
+  const res = await authFetch(
+    `/v1/reconstructions/${hash}`,
+    "read",
+    range ? { headers: { Range: `bytes=${range.start}-${range.end}` } } : {},
+  );
+  const recon: ReconstructionResponse = await res.json();
+  const wasm = await loadWasm();
+
+  const parts = await Promise.all(
+    recon.terms.map(async (term) => {
+      const info = recon.fetch_info[term.hash]?.find(
+        (f) =>
+          f.range.start <= term.range.start && f.range.end >= term.range.end,
+      );
+      if (!info) throw new Error(`no fetch info for xorb ${term.hash}`);
+      // fetch_info URLs are presigned (token in query) — no auth header.
+      const r = await fetch(info.url, {
+        headers: {
+          Range: `bytes=${info.url_range.start}-${info.url_range.end}`,
+        },
+      });
+      if (!r.ok && r.status !== 206) {
+        throw new Error(`xorb fetch failed: HTTP ${r.status}`);
+      }
+      const bytes = new Uint8Array(await r.arrayBuffer());
+      return wasm.decode_chunks(
+        bytes,
+        term.range.start - info.range.start,
+        term.range.end - info.range.start,
+      );
+    }),
+  );
+
+  const total = parts.reduce((sum, p) => sum + p.length, 0);
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const p of parts) {
+    joined.set(p, offset);
+    offset += p.length;
+  }
+
+  // Terms are chunk-aligned; trim to the exact requested byte window.
+  const from = recon.offset_into_first_range;
+  const to = range ? Math.min(from + (range.end - range.start + 1), total) : total;
+  return joined.buffer.slice(from, to);
 }
 
-/** Fetch a byte range from a file's content. */
+export async function fetchFileContent(hash: string): Promise<ArrayBuffer> {
+  return reconstructContent(hash);
+}
+
+/** Fetch a byte range (inclusive end) from a file's content. */
 export async function fetchFileContentRange(
   hash: string,
   start: number,
   end: number,
 ): Promise<ArrayBuffer> {
-  const res = await authFetch(`/v1/content/${hash}`, "read", {
-    headers: { Range: `bytes=${start}-${end}` },
-  });
-  return res.arrayBuffer();
-}
-
-/**
- * URL for streaming file content (supports HTTP Range requests). Carries the
- * token as a query parameter so consumers that can't set headers (download
- * links, DuckDB-WASM range reads) can fetch it directly.
- */
-export async function fileContentUrl(hash: string): Promise<string> {
-  const token = await mintToken("read");
-  return `/v1/content/${hash}?token=${token}`;
+  return reconstructContent(hash, { start, end });
 }
 
 // ─── Upload (client-side chunking via openxet-wasm) ─────────────────────────

@@ -24,7 +24,6 @@ import {
   fetchFileDetail,
   fetchFileContent,
   fetchFileContentRange,
-  fileContentUrl,
 } from "@/lib/api";
 import { formatBytes, truncateHash } from "@/lib/format";
 
@@ -375,28 +374,27 @@ function FileContentPreview({
     return isParquetProbe(new Uint8Array(probe.data));
   }, [probe.data]);
 
-  // Parquet is range-read by DuckDB directly from a URL, which carries a
-  // short-lived token in its query string — mint it on demand.
-  const contentUrl = useQuery({
-    queryKey: ["file-content-url", hash],
-    queryFn: () => fileContentUrl(hash),
-    enabled: isParquet,
-  });
-
-  // Only fetch full content for non-parquet files.
+  // ponytail: parquet is fully downloaded and handed to DuckDB as a buffer;
+  // lazy range reads would need a plain-HTTP range endpoint, which the
+  // Xet-protocol-only server no longer exposes.
   const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", hash],
     queryFn: () => fetchFileContent(hash),
-    enabled: probe.isSuccess && !isParquet,
+    enabled: probe.isSuccess,
   });
 
+  const parquetBytes = useMemo(
+    () => (isParquet && data ? new Uint8Array(data.slice(0)) : null),
+    [isParquet, data],
+  );
+
   const detected = useMemo(() => {
-    if (!data) return null;
+    if (!data || isParquet) return null;
     // Copy the buffer so downstream consumers (e.g. DuckDB registerFileBuffer)
     // that transfer/detach the ArrayBuffer don't corrupt React Query's cache.
     const bytes = new Uint8Array(data.slice(0));
     return detectContentType(bytes);
-  }, [data]);
+  }, [data, isParquet]);
 
   const handleDownload = () => {
     if (!data) return;
@@ -425,7 +423,7 @@ function FileContentPreview({
     );
   }
 
-  const showLoading = probe.isLoading || (!isParquet && isLoading);
+  const showLoading = probe.isLoading || isLoading;
 
   return (
     <Card>
@@ -452,7 +450,7 @@ function FileContentPreview({
                 )}
           </CardDescription>
         </div>
-        {data && !isParquet && (
+        {data && (
           <Button variant="outline" size="sm" onClick={handleDownload}>
             <Download className="mr-1.5 size-4" />
             Download
@@ -467,7 +465,7 @@ function FileContentPreview({
             <Skeleton className="h-4 w-5/6" />
           </div>
         ) : isParquet ? (
-          contentUrl.data ? (
+          parquetBytes ? (
             <Suspense
               fallback={
                 <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
@@ -475,7 +473,7 @@ function FileContentPreview({
                 </div>
               }
             >
-              <LazyTablePreview format="parquet" contentUrl={contentUrl.data} />
+              <LazyTablePreview format="parquet" bytes={parquetBytes} />
             </Suspense>
           ) : null
         ) : detected?.kind === "image" ? (

@@ -9,6 +9,7 @@ dependencies = [
     "aiohttp>=3.9",
     "anyio>=4",
     "hf-xet>=1.1.10",
+    "lz4>=4",
     "PyJWT>=2.8",
 ]
 

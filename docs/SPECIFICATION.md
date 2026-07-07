@@ -355,8 +355,10 @@ Simple web UI for browsing and managing files stored in the CAS server. Served a
 The server exposes no endpoints beyond the Xet protocol (`/v1/*`); the
 frontend drives it directly. Uploads are chunked/hashed/packed client-side by
 `openxet-wasm` (`crates/wasm` compiled to WebAssembly) and POSTed as
-xorbs + a shard; downloads use `/v1/content` (and `/v1/reconstructions` for
-metadata). File listing has no protocol equivalent — the UI keeps a local
+xorbs + a shard; downloads fetch the reconstruction plan from
+`/v1/reconstructions` and reassemble the file client-side from ranged xorb
+fetches (chunk decoding via `openxet-wasm`). File listing has no protocol
+equivalent — the UI keeps a local
 catalog in browser localStorage. Auth tokens are minted in the browser
 (WebCrypto HS256) from the server secret.
 
