@@ -90,12 +90,20 @@ pub async fn post_xorb(
 /// header (it treats them like presigned URLs). This route is therefore the
 /// unauthenticated fallback used only when the storage backend can't presign
 /// (local filesystem); cloud backends hand out presigned URLs that bypass this
-/// route entirely.
+/// route entirely, so on those backends this route serves nothing and 404s.
 pub async fn get_xorb(
     State(state): State<AppState>,
     Path(hash): Path<String>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
+    // On presign-capable backends clients fetch directly from object storage;
+    // this route is only the filesystem fallback, so refuse to serve otherwise.
+    if state.storage.supports_presigned_urls() {
+        return Err(AppError::NotFound(format!(
+            "xorb download not served by this backend: {hash}"
+        )));
+    }
+
     validate_hash(&hash)?;
 
     if let Some(range_val) = headers.get("range") {

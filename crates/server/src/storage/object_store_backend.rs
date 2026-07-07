@@ -33,6 +33,13 @@ impl ObjectStoreBackend {
         Self { store, signer }
     }
 
+    /// Whether this backend can mint presigned download URLs. When `true`,
+    /// reconstruction hands out presigned URLs straight to object storage and
+    /// the server's own xorb-download route is unused (and refuses to serve).
+    pub fn supports_presigned_urls(&self) -> bool {
+        self.signer.is_some()
+    }
+
     fn xorb_path(hash: &str) -> ObjectPath {
         ObjectPath::from(format!("xorbs/default/{hash}"))
     }
