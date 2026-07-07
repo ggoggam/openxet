@@ -18,9 +18,8 @@ use crate::state::AppState;
 // generic body-limit 413.
 const MAX_BODY_SIZE: usize = 65 * 1024 * 1024;
 
-/// Replace any `token=…` value in a query string with a placeholder so
-/// short-lived fetch tokens (passed as `?token=` on presigned-style URLs) never
-/// land in request logs.
+/// Replace any `token=…` value in a query string with a placeholder as a
+/// defensive measure so credentials never land in request logs.
 fn redact_query(query: &str) -> String {
     query
         .split('&')

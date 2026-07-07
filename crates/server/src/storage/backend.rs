@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use bytes::Bytes;
 
 use super::error::StorageError;
@@ -37,6 +39,17 @@ pub trait StorageBackend: Send + Sync {
         hash: &str,
         data: Bytes,
     ) -> impl Future<Output = Result<bool, StorageError>> + Send;
+
+    /// Generate a presigned URL for downloading a xorb directly from the
+    /// underlying object store, valid for `expires_in`. Cloud backends
+    /// (S3/GCS/Azure) return `Some(url)`; backends that cannot presign (e.g.
+    /// the local filesystem) return `None`, in which case the caller serves the
+    /// xorb through the server's own public download route instead.
+    fn presigned_xorb_url(
+        &self,
+        hash: &str,
+        expires_in: Duration,
+    ) -> impl Future<Output = Result<Option<String>, StorageError>> + Send;
 
     /// Check whether a xorb exists.
     fn xorb_exists(&self, hash: &str) -> impl Future<Output = Result<bool, StorageError>> + Send;

@@ -1,9 +1,12 @@
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
+use object_store::signer::Signer;
+use reqwest::Method;
 
 use super::backend::{StorageBackend, validate_hash};
 use super::error::StorageError;
@@ -20,11 +23,14 @@ use super::error::StorageError;
 /// ```
 pub struct ObjectStoreBackend {
     store: Arc<dyn ObjectStore>,
+    /// Present only for backends that support presigned URLs (S3/GCS/Azure).
+    /// `None` for the local filesystem, which has no direct-fetch URL.
+    signer: Option<Arc<dyn Signer>>,
 }
 
 impl ObjectStoreBackend {
-    pub fn new(store: Arc<dyn ObjectStore>) -> Self {
-        Self { store }
+    pub fn new(store: Arc<dyn ObjectStore>, signer: Option<Arc<dyn Signer>>) -> Self {
+        Self { store, signer }
     }
 
     fn xorb_path(hash: &str) -> ObjectPath {
@@ -106,6 +112,24 @@ impl StorageBackend for ObjectStoreBackend {
         Ok(true)
     }
 
+    async fn presigned_xorb_url(
+        &self,
+        hash: &str,
+        expires_in: Duration,
+    ) -> Result<Option<String>, StorageError> {
+        validate_hash(hash)?;
+        match &self.signer {
+            Some(signer) => {
+                let url = signer
+                    .signed_url(Method::GET, &Self::xorb_path(hash), expires_in)
+                    .await
+                    .map_err(map_error)?;
+                Ok(Some(url.to_string()))
+            }
+            None => Ok(None),
+        }
+    }
+
     async fn xorb_exists(&self, hash: &str) -> Result<bool, StorageError> {
         validate_hash(hash)?;
         match self.store.head(&Self::xorb_path(hash)).await {
@@ -157,7 +181,7 @@ mod tests {
     const TEST_HASH_2: &str = "b1b2c3d4e5f60708091011121314151617181920212223242526272829303132";
 
     fn make_backend() -> ObjectStoreBackend {
-        ObjectStoreBackend::new(Arc::new(InMemory::new()))
+        ObjectStoreBackend::new(Arc::new(InMemory::new()), None)
     }
 
     #[tokio::test]
@@ -256,6 +280,16 @@ mod tests {
         assert_eq!(xorbs[0].1, 5);
         assert_eq!(xorbs[1].0, TEST_HASH_2);
         assert_eq!(xorbs[1].1, 5);
+    }
+
+    #[tokio::test]
+    async fn test_presigned_url_none_without_signer() {
+        let backend = make_backend();
+        let url = backend
+            .presigned_xorb_url(TEST_HASH, Duration::from_secs(60))
+            .await
+            .unwrap();
+        assert!(url.is_none(), "in-memory backend cannot presign");
     }
 
     #[tokio::test]

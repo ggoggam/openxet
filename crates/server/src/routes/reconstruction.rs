@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -11,7 +12,7 @@ use openxet_cas_types::reconstruction::{
 };
 use openxet_cas_types::shard::Shard;
 
-use crate::auth::{Claims, RequireRead, Scope, create_token};
+use crate::auth::RequireRead;
 use crate::error::AppError;
 use crate::state::AppState;
 use crate::storage::{FileIndex, StorageBackend, validate_hash};
@@ -48,13 +49,6 @@ fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppErro
     Ok(Some((start, end)))
 }
 
-fn now_unix() -> usize {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("system clock before unix epoch")
-        .as_secs() as usize
-}
-
 /// Compute byte offsets for each chunk within a serialized xorb by walking chunk headers.
 /// Returns a list of (offset_start, offset_end) byte positions in the xorb binary for each chunk.
 fn compute_chunk_byte_offsets(xorb_data: &[u8]) -> Vec<(u64, u64)> {
@@ -79,7 +73,7 @@ fn compute_chunk_byte_offsets(xorb_data: &[u8]) -> Vec<(u64, u64)> {
 
 pub async fn get_reconstruction(
     State(state): State<AppState>,
-    RequireRead(claims): RequireRead,
+    RequireRead(_claims): RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<QueryReconstructionResponse>, AppError> {
@@ -157,12 +151,12 @@ pub async fn get_reconstruction(
         terms = trimmed_terms;
     }
 
-    // Build fetch_info: for each unique xorb, compute byte offsets.
-    // Prefer the configured public URL; the `Host` header is attacker-controlled
-    // and, since fetch URLs embed a read token, trusting it would let a request
-    // steer that token at an arbitrary host. Fall back to `Host` only when no
-    // public URL is configured (local/dev, where the bound port may differ from
-    // config, e.g. an OS-assigned port).
+    // xet-core fetches fetch_info URLs with no Authorization header, so each URL
+    // must be self-authenticating. Cloud backends satisfy this with a presigned
+    // URL straight to object storage (this server stays out of the data path).
+    // The local filesystem can't presign, so it falls back to the server's own
+    // public xorb route. Prefer the configured public URL for that fallback;
+    // otherwise use the request `Host`, then the bound address.
     let base_url = state
         .config
         .server
@@ -176,17 +170,7 @@ pub async fn get_reconstruction(
         })
         .unwrap_or_else(|| state.config.base_url());
 
-    // fetch_info URLs must be fetchable with no Authorization header (xet-core
-    // treats them like presigned S3 URLs), so embed a short-lived read token.
-    let fetch_token = create_token(
-        &state.fetch_token_secret,
-        &Claims {
-            scope: Scope::Read,
-            repo: claims.repo.clone(),
-            exp: now_unix() + state.config.auth.shard_key_ttl_seconds as usize,
-        },
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("failed to mint fetch token: {e}")))?;
+    let url_ttl = Duration::from_secs(state.config.auth.shard_key_ttl_seconds);
 
     let mut fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>> = HashMap::new();
 
@@ -206,14 +190,16 @@ pub async fn get_reconstruction(
             let byte_start = chunk_offsets[start_idx].0;
             let byte_end = chunk_offsets[end_idx - 1].1 - 1; // inclusive for HTTP Range
 
+            let url = match state.storage.presigned_xorb_url(&term.hash, url_ttl).await? {
+                Some(presigned) => presigned,
+                None => format!("{base_url}/v1/xorbs/default/{}", term.hash),
+            };
+
             fetch_info.insert(
                 term.hash.clone(),
                 vec![CASReconstructionFetchInfo {
                     range: term.range,
-                    url: format!(
-                        "{base_url}/v1/xorbs/default/{}?token={fetch_token}",
-                        term.hash
-                    ),
+                    url,
                     url_range: ByteRange {
                         start: byte_start,
                         end: byte_end,

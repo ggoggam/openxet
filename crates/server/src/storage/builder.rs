@@ -6,6 +6,7 @@ use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
+use object_store::signer::Signer;
 
 use crate::config::StorageConfig;
 
@@ -17,7 +18,13 @@ use super::object_store_backend::ObjectStoreBackend;
 /// GCS, and Azure Blob — is routed through the `object_store` crate so the
 /// server talks to a single unified [`object_store::ObjectStore`] interface.
 pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStoreBackend> {
-    let store: Arc<dyn ObjectStore> = match config.backend.as_str() {
+    // Cloud backends can mint presigned URLs (the `Signer` handle); the local
+    // filesystem cannot, so its signer is `None` and downloads fall back to the
+    // server's own xorb route.
+    let (store, signer): (Arc<dyn ObjectStore>, Option<Arc<dyn Signer>>) = match config
+        .backend
+        .as_str()
+    {
         "filesystem" => {
             // `LocalFileSystem` requires its root prefix to exist; also create
             // the xorb/shard subtrees so listing an empty store never errors.
@@ -31,7 +38,7 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
 
             let store = LocalFileSystem::new_with_prefix(data_dir)
                 .context("failed to initialize filesystem storage")?;
-            Arc::new(store)
+            (Arc::new(store) as Arc<dyn ObjectStore>, None)
         }
         "s3" => {
             let bucket = config
@@ -57,7 +64,8 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
                 builder = builder.with_allow_http(true);
             }
 
-            Arc::new(builder.build().context("failed to build S3 client")?)
+            let s3 = Arc::new(builder.build().context("failed to build S3 client")?);
+            (s3.clone() as Arc<dyn ObjectStore>, Some(s3 as Arc<dyn Signer>))
         }
         "gcs" => {
             let bucket = config
@@ -71,7 +79,11 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
                 builder = builder.with_service_account_path(path);
             }
 
-            Arc::new(builder.build().context("failed to build GCS client")?)
+            let gcs = Arc::new(builder.build().context("failed to build GCS client")?);
+            (
+                gcs.clone() as Arc<dyn ObjectStore>,
+                Some(gcs as Arc<dyn Signer>),
+            )
         }
         "azure" => {
             let container = config
@@ -88,10 +100,14 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
                 builder = builder.with_access_key(key);
             }
 
-            Arc::new(builder.build().context("failed to build Azure client")?)
+            let azure = Arc::new(builder.build().context("failed to build Azure client")?);
+            (
+                azure.clone() as Arc<dyn ObjectStore>,
+                Some(azure as Arc<dyn Signer>),
+            )
         }
         other => bail!("unknown storage backend: {other}"),
     };
 
-    Ok(ObjectStoreBackend::new(store))
+    Ok(ObjectStoreBackend::new(store, signer))
 }
