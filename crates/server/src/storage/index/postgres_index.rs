@@ -381,9 +381,8 @@ impl FileIndex for PostgresFileIndex {
         // `$after IS NULL OR key > $after` folds the first-page and
         // continuation cases into one prepared statement.
         let rows: Vec<(String, String, i64)> = match owner {
-            None => {
-                sqlx::query_as(
-                    "SELECT f.file_hash, f.shard_hash, \
+            None => sqlx::query_as(
+                "SELECT f.file_hash, f.shard_hash, \
                             COALESCE(MAX(o.logical_bytes), 0)::BIGINT \
                      FROM file_index f \
                      LEFT JOIN file_ownership o ON o.file_hash = f.file_hash \
@@ -391,29 +390,26 @@ impl FileIndex for PostgresFileIndex {
                      GROUP BY f.file_hash, f.shard_hash \
                      ORDER BY f.file_hash \
                      LIMIT $2",
-                )
-                .bind(after)
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(pg_err)?
-            }
-            Some(owner) => {
-                sqlx::query_as(
-                    "SELECT o.file_hash, f.shard_hash, o.logical_bytes \
+            )
+            .bind(after)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(pg_err)?,
+            Some(owner) => sqlx::query_as(
+                "SELECT o.file_hash, f.shard_hash, o.logical_bytes \
                      FROM file_ownership o \
                      JOIN file_index f ON f.file_hash = o.file_hash \
                      WHERE o.owner_id = $1 AND ($2::text IS NULL OR o.file_hash > $2) \
                      ORDER BY o.file_hash \
                      LIMIT $3",
-                )
-                .bind(owner)
-                .bind(after)
-                .bind(limit as i64)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(pg_err)?
-            }
+            )
+            .bind(owner)
+            .bind(after)
+            .bind(limit as i64)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(pg_err)?,
         };
         Ok(rows
             .into_iter()

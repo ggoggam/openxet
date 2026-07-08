@@ -79,9 +79,7 @@ pub async fn run_gc(state: &AppState, grace: Duration) -> Result<GcReport, Stora
             // Only entries of files that currently resolve to *this* shard
             // keep xorbs alive. A stale entry (file deleted, or re-registered
             // through a newer shard) must not pin storage.
-            if file_to_shard.get(&file_hash_hex).map(String::as_str)
-                != Some(shard_hash.as_str())
-            {
+            if file_to_shard.get(&file_hash_hex).map(String::as_str) != Some(shard_hash.as_str()) {
                 continue;
             }
 
@@ -96,8 +94,9 @@ pub async fn run_gc(state: &AppState, grace: Duration) -> Result<GcReport, Stora
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let in_grace =
-        |last_modified_unix: i64| now_unix.saturating_sub(last_modified_unix) < grace.as_secs() as i64;
+    let in_grace = |last_modified_unix: i64| {
+        now_unix.saturating_sub(last_modified_unix) < grace.as_secs() as i64
+    };
 
     // -- Sweep xorbs --------------------------------------------------------
     for object in state.storage.list_xorbs().await? {

@@ -388,8 +388,9 @@ impl FileIndex for RocksDbFileIndex {
                     let Some(shard) = self.db.get(file_hash.as_bytes()).map_err(rocks_err)? else {
                         continue; // claim without a live file entry
                     };
-                    let claim: OwnershipClaim = serde_json::from_slice(&v)
-                        .map_err(|e| StorageError::Index(format!("corrupt ownership entry: {e}")))?;
+                    let claim: OwnershipClaim = serde_json::from_slice(&v).map_err(|e| {
+                        StorageError::Index(format!("corrupt ownership entry: {e}"))
+                    })?;
                     out.push(FileListEntry {
                         file_hash: file_hash.to_string(),
                         shard_hash: String::from_utf8_lossy(&shard).into_owned(),

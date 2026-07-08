@@ -217,7 +217,11 @@ async fn shared_file_survives_until_last_owner_releases() {
     assert_eq!(acc.claimed_files, 1);
     assert_eq!(acc.owners.len(), 2);
     // Both claimants are charged the full logical size…
-    assert!(acc.owners.iter().all(|o| o.logical_bytes == data.len() as u64));
+    assert!(
+        acc.owners
+            .iter()
+            .all(|o| o.logical_bytes == data.len() as u64)
+    );
     // …but the dedup-aware total counts the file once.
     assert_eq!(acc.unique_file_bytes, data.len() as u64);
 

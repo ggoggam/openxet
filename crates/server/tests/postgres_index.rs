@@ -156,10 +156,7 @@ async fn postgres_upload_reconstruct_and_dedup() {
         .unwrap();
     assert_eq!(resp.status(), 200, "gc failed");
     let report: serde_json::Value = resp.json().await.unwrap();
-    assert_eq!(
-        report["deleted_xorbs"],
-        artifacts.xorb_entries.len() as u64
-    );
+    assert_eq!(report["deleted_xorbs"], artifacts.xorb_entries.len() as u64);
     assert_eq!(report["deleted_shards"], 1);
 
     // The dedup entry must be gone from the Postgres chunk index too.

@@ -92,10 +92,7 @@ async fn paginate_all_files(server: &TestServer, base_query: &str, limit: usize)
         let (status, page) = list_files_page(server, &query).await;
         assert_eq!(status, 200);
         let page = page.unwrap();
-        assert!(
-            page.items.len() <= limit,
-            "page exceeded requested limit"
-        );
+        assert!(page.items.len() <= limit, "page exceeded requested limit");
         seen.extend(page.items.into_iter().map(|e| e.file_hash));
         match page.next_cursor {
             Some(c) => cursor = Some(c),
@@ -206,8 +203,16 @@ async fn file_detail_returns_owners_and_referenced_xorbs() {
     assert_eq!(detail.logical_bytes, data.len() as u64);
 
     let owner_names: BTreeSet<String> = detail.owners.iter().map(|o| o.owner.clone()).collect();
-    assert_eq!(owner_names, BTreeSet::from(["alice".to_string(), "bob".to_string()]));
-    assert!(detail.owners.iter().all(|o| o.logical_bytes == data.len() as u64));
+    assert_eq!(
+        owner_names,
+        BTreeSet::from(["alice".to_string(), "bob".to_string()])
+    );
+    assert!(
+        detail
+            .owners
+            .iter()
+            .all(|o| o.logical_bytes == data.len() as u64)
+    );
     assert!(detail.owners.iter().all(|o| o.created_at_unix > 0));
 
     // The referenced xorbs must be exactly the ones the artifacts carry.
@@ -291,7 +296,10 @@ async fn invalid_cursor_is_rejected() {
     let server = TestServer::start().await;
     let resp = server
         .client
-        .get(format!("{}/v1/files?cursor=not_base64_!!!", server.base_url))
+        .get(format!(
+            "{}/v1/files?cursor=not_base64_!!!",
+            server.base_url
+        ))
         .bearer_auth(server.read_token())
         .send()
         .await
