@@ -10,3 +10,9 @@ export function formatBytes(bytes: number): string {
   const value = bytes / Math.pow(1024, i);
   return `${value.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
+
+/** Format a unix-seconds timestamp as a local date-time, or "—" for 0/absent. */
+export function formatUnixTime(seconds: number): string {
+  if (!seconds) return "—";
+  return new Date(seconds * 1000).toLocaleString();
+}

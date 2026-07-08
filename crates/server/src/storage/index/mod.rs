@@ -50,6 +50,69 @@ pub struct XorbLayout {
     pub chunks: Vec<XorbChunk>,
 }
 
+/// One ownership claim on a file: who registered it and how large it is.
+///
+/// Claims are the accounting unit. The same file uploaded by two owners
+/// yields two claims on one `file_index` row — each owner is charged the
+/// file's full logical size, and the file only becomes garbage once every
+/// claim is released.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnershipClaim {
+    /// Logical (pre-dedup, pre-compression) file size in bytes.
+    pub logical_bytes: u64,
+    /// When the claim was first recorded, unix seconds.
+    pub created_at_unix: i64,
+}
+
+/// Aggregated usage for one owner across all their claimed files.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerUsage {
+    pub owner: String,
+    pub file_count: u64,
+    pub logical_bytes: u64,
+}
+
+/// One ownership claim with its holder, for the file-detail view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OwnerClaim {
+    pub owner: String,
+    pub logical_bytes: u64,
+    pub created_at_unix: i64,
+}
+
+/// One row of the paginated file listing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FileListEntry {
+    pub file_hash: String,
+    pub shard_hash: String,
+    /// Logical size from an ownership claim, or `0` for a pre-accounting file
+    /// that has no claims.
+    pub logical_bytes: u64,
+}
+
+/// One row of the paginated xorb listing, sourced from the layout index (the
+/// set of xorbs known to dedup), not an object-store scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct XorbSummary {
+    pub xorb_hash: String,
+    /// Stored (compressed) size on disk.
+    pub num_bytes_on_disk: u64,
+    pub chunk_count: u64,
+}
+
+/// A full accounting snapshot derived from the ownership claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageReport {
+    /// Per-owner totals, sorted by owner for stable output.
+    pub owners: Vec<OwnerUsage>,
+    /// Number of distinct claimed files.
+    pub claimed_files: u64,
+    /// Logical bytes counting each distinct file once (unlike the per-owner
+    /// totals, which charge every claimant). Comparing this against physical
+    /// xorb bytes gives the dedup ratio.
+    pub unique_file_bytes: u64,
+}
+
 /// Index mapping file hashes to shard hashes.
 ///
 /// Used for file reconstruction lookups: given a file hash, find the shard
@@ -71,6 +134,49 @@ pub trait FileIndex: Send + Sync {
 
     /// List all file index entries as (file_hash, shard_hash) pairs.
     fn list_all(&self) -> impl Future<Output = Result<Vec<(String, String)>, StorageError>> + Send;
+
+    /// List files ordered by file hash, starting strictly after `after`
+    /// (a keyset cursor), returning at most `limit` rows. When `owner` is set,
+    /// only files that owner claims are returned. This is the paginated
+    /// management listing; `list_all` remains for full in-process scans (GC).
+    fn list_files(
+        &self,
+        after: Option<&str>,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<FileListEntry>, StorageError>> + Send;
+
+    /// Remove a file's index entry and any remaining ownership claims on it.
+    /// The file becomes unreachable and its exclusive storage is reclaimed by
+    /// the next GC sweep. Removing an unknown file is a no-op.
+    fn remove(&self, file_hash: &str) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Record (or refresh) `owner`'s claim on a file. Claiming an
+    /// already-claimed file updates the size but keeps the original
+    /// `created_at_unix`.
+    fn claim(
+        &self,
+        owner: &str,
+        file_hash: &str,
+        claim: OwnershipClaim,
+    ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Release `owner`'s claim on a file. Returns `true` if a claim existed.
+    fn release(
+        &self,
+        owner: &str,
+        file_hash: &str,
+    ) -> impl Future<Output = Result<bool, StorageError>> + Send;
+
+    /// List the claims currently held on a file, ordered by owner. An empty
+    /// result means either the file is unknown or it predates accounting.
+    fn file_claims(
+        &self,
+        file_hash: &str,
+    ) -> impl Future<Output = Result<Vec<OwnerClaim>, StorageError>> + Send;
+
+    /// Aggregate all ownership claims into an accounting snapshot.
+    fn usage(&self) -> impl Future<Output = Result<UsageReport, StorageError>> + Send;
 }
 
 /// Index mapping chunk hashes to their locations in xorbs.
@@ -116,6 +222,20 @@ pub trait ChunkIndex: Send + Sync {
         xorb_hash: &str,
         layout: XorbLayout,
     ) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// Remove a deleted xorb from the index: its layout and every
+    /// `chunk_hash → location` entry pointing at it, so dedup responses stop
+    /// directing clients to a xorb that no longer exists. Idempotent.
+    fn remove_xorb(&self, xorb_hash: &str)
+    -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// List indexed xorbs (those with a recorded layout) ordered by xorb hash,
+    /// starting strictly after `after`, returning at most `limit` summaries.
+    fn list_xorb_summaries(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> impl Future<Output = Result<Vec<XorbSummary>, StorageError>> + Send;
 }
 
 /// A [`FileIndex`] selected at startup from configuration.
@@ -147,6 +267,58 @@ impl FileIndex for FileIndexBackend {
         match self {
             Self::RocksDb(i) => i.list_all().await,
             Self::Postgres(i) => i.list_all().await,
+        }
+    }
+
+    async fn list_files(
+        &self,
+        after: Option<&str>,
+        owner: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<FileListEntry>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.list_files(after, owner, limit).await,
+            Self::Postgres(i) => i.list_files(after, owner, limit).await,
+        }
+    }
+
+    async fn remove(&self, file_hash: &str) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.remove(file_hash).await,
+            Self::Postgres(i) => i.remove(file_hash).await,
+        }
+    }
+
+    async fn claim(
+        &self,
+        owner: &str,
+        file_hash: &str,
+        claim: OwnershipClaim,
+    ) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.claim(owner, file_hash, claim).await,
+            Self::Postgres(i) => i.claim(owner, file_hash, claim).await,
+        }
+    }
+
+    async fn release(&self, owner: &str, file_hash: &str) -> Result<bool, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.release(owner, file_hash).await,
+            Self::Postgres(i) => i.release(owner, file_hash).await,
+        }
+    }
+
+    async fn file_claims(&self, file_hash: &str) -> Result<Vec<OwnerClaim>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.file_claims(file_hash).await,
+            Self::Postgres(i) => i.file_claims(file_hash).await,
+        }
+    }
+
+    async fn usage(&self) -> Result<UsageReport, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.usage().await,
+            Self::Postgres(i) => i.usage().await,
         }
     }
 }
@@ -195,6 +367,24 @@ impl ChunkIndex for ChunkIndexBackend {
         match self {
             Self::RocksDb(i) => i.put_xorb_layout(xorb_hash, layout).await,
             Self::Postgres(i) => i.put_xorb_layout(xorb_hash, layout).await,
+        }
+    }
+
+    async fn remove_xorb(&self, xorb_hash: &str) -> Result<(), StorageError> {
+        match self {
+            Self::RocksDb(i) => i.remove_xorb(xorb_hash).await,
+            Self::Postgres(i) => i.remove_xorb(xorb_hash).await,
+        }
+    }
+
+    async fn list_xorb_summaries(
+        &self,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<XorbSummary>, StorageError> {
+        match self {
+            Self::RocksDb(i) => i.list_xorb_summaries(after, limit).await,
+            Self::Postgres(i) => i.list_xorb_summaries(after, limit).await,
         }
     }
 }

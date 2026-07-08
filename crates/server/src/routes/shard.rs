@@ -18,7 +18,7 @@ use crate::error::AppError;
 use crate::routes::xorb_meta::xorb_info_from_stored;
 use crate::state::AppState;
 use crate::storage::index::ChunkLocation;
-use crate::storage::{ChunkIndex, FileIndex, StorageBackend, validate_hash};
+use crate::storage::{ChunkIndex, FileIndex, OwnershipClaim, StorageBackend, validate_hash};
 
 /// Maximum shard size: 64 MiB.
 pub(crate) const MAX_SHARD_SIZE: usize = 64 * 1024 * 1024;
@@ -30,7 +30,7 @@ pub struct ShardUploadResponse {
 
 pub async fn post_shard(
     State(state): State<AppState>,
-    _auth: RequireWrite,
+    RequireWrite(claims): RequireWrite,
     body: Bytes,
 ) -> Result<Json<ShardUploadResponse>, AppError> {
     if body.len() > MAX_SHARD_SIZE {
@@ -58,6 +58,9 @@ pub async fn post_shard(
     // Chunk hashes come from the stored xorbs' metadata footers, which were
     // themselves verified against the chunk data at xorb upload time.
     let mut xorb_meta_cache: HashMap<String, Arc<XorbObjectInfoV1>> = HashMap::new();
+
+    // (file_hash, logical_bytes) per validated file, for ownership accounting.
+    let mut file_sizes: Vec<(String, u64)> = Vec::new();
 
     for file_idx in 0..shard.num_files() {
         let file_view = shard.file(file_idx).expect("index in range");
@@ -145,6 +148,9 @@ pub async fn post_shard(
                 computed_file_hash.hex()
             )));
         }
+
+        let logical_bytes: u64 = file_chunks.iter().map(|(_, size)| size).sum();
+        file_sizes.push((computed_file_hash.hex(), logical_bytes));
     }
 
     // Content-address the shard the same way xet-core names shard files:
@@ -154,12 +160,25 @@ pub async fn post_shard(
     // Store the shard
     let was_inserted = state.storage.put_shard(&shard_hash_hex, body).await?;
 
-    // Index file hashes
-    for file_idx in 0..shard.num_files() {
-        let file_view = shard.file(file_idx).expect("index in range");
+    // Index file hashes and record the uploader's ownership claim on each —
+    // the accounting record and the deletion refcount.
+    let owner = claims.owner();
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    for (file_hash_hex, logical_bytes) in &file_sizes {
+        state.file_index.put(file_hash_hex, &shard_hash_hex).await?;
         state
             .file_index
-            .put(&file_view.file_hash().hex(), &shard_hash_hex)
+            .claim(
+                owner,
+                file_hash_hex,
+                OwnershipClaim {
+                    logical_bytes: *logical_bytes,
+                    created_at_unix: now_unix,
+                },
+            )
             .await?;
     }
 

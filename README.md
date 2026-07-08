@@ -153,9 +153,46 @@ wasm ┤
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
 
-These are the only API endpoints the server exposes — the same wire protocol
-HuggingFace's `xet-core` / `hf_xet` clients speak. All uploads and downloads,
-including the web UI's and the examples', go through them.
+These are the same wire protocol endpoints HuggingFace's `xet-core` / `hf_xet`
+clients speak. All uploads and downloads, including the web UI's and the
+examples', go through them.
+
+#### Lifecycle Endpoints
+
+Not part of the Xet wire protocol — these manage the data's lifecycle:
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/v1/files` | List files (cursor-paginated), optionally filtered to one owner's files |
+| `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs |
+| `DELETE` | `/v1/files/{file_id}` | Release the caller's ownership claim on a file; the file is removed once its last claim is released |
+| `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count |
+| `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (optional `?grace_seconds=` override); returns a report of what was deleted |
+| `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio |
+
+**Cursor pagination.** List endpoints (`/v1/files`, `/v1/xorbs`) take `?limit=`
+(default 100, max 1000) and return `{ "items": [...], "next_cursor": "..." }`.
+Pass the returned `next_cursor` back as `?cursor=` to fetch the next page;
+its absence means the last page. Cursors are opaque and use keyset pagination
+over the ordered index (by content hash), so each page is an indexed range scan
+regardless of depth, and concurrent inserts or deletes never shift rows across
+page boundaries. `/v1/files` also accepts `?owner=` to list only one owner's
+files.
+
+Every file registered via a shard upload records an **ownership claim** for the
+uploading identity (the token's `sub` claim; `"default"` when auth is
+disabled). Claims are the accounting unit: each owner is charged the full
+logical size of the files they claim, and a file only becomes garbage when
+every claim on it is released.
+
+**Garbage collection** is mark-and-sweep: files in the index are the roots,
+their shards are parsed to mark reachable xorbs, and everything unmarked is
+deleted — including its dedup index entries. Unreferenced objects younger than
+`gc.grace_seconds` (default 24h) are never collected, because clients upload
+xorbs *before* registering them in a shard; keep the grace period comfortably
+above your longest plausible upload session. GC runs on demand via `POST
+/v1/gc`, or periodically when `gc.interval_seconds`
+(`OPENXET_GC_INTERVAL_SECONDS`) is set.
 
 ### Storage Layout
 
@@ -165,6 +202,7 @@ including the web UI's and the examples', go through them.
 ├── shards/{hash}           # File metadata
 ├── index/
 │   ├── files/              # file_hash → shard_hash mapping
+│   ├── ownership/          # (file_hash, owner) → ownership claim (accounting)
 │   └── chunks/             # chunk_hash → (xorb_hash, chunk_index) mapping
 ```
 

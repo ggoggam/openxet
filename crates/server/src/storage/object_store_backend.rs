@@ -8,7 +8,7 @@ use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
 use reqwest::Method;
 
-use super::backend::{StorageBackend, validate_hash};
+use super::backend::{StorageBackend, StoredObject, validate_hash};
 use super::error::StorageError;
 
 /// Object-store-backed storage for xorbs and shards.
@@ -56,11 +56,11 @@ fn map_error(err: object_store::Error) -> StorageError {
     }
 }
 
-/// List objects under a prefix, returning (filename, size) pairs.
+/// List objects under a prefix with their size and last-modified time.
 async fn list_prefix(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
-) -> Result<Vec<(String, u64)>, StorageError> {
+) -> Result<Vec<StoredObject>, StorageError> {
     use futures::TryStreamExt;
 
     let mut entries = Vec::new();
@@ -69,12 +69,29 @@ async fn list_prefix(
     while let Some(meta) = stream.try_next().await.map_err(map_error)? {
         let name = meta.location.filename().unwrap_or_default().to_string();
         if !name.is_empty() && !name.starts_with('.') {
-            entries.push((name, meta.size as u64));
+            entries.push(StoredObject {
+                hash: name,
+                size: meta.size as u64,
+                last_modified_unix: meta.last_modified.timestamp(),
+            });
         }
     }
 
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| a.hash.cmp(&b.hash));
     Ok(entries)
+}
+
+/// Delete an object, treating "already gone" as success so GC sweeps are
+/// idempotent and safe to race with each other.
+async fn delete_ignoring_missing(
+    store: &dyn ObjectStore,
+    path: &ObjectPath,
+) -> Result<(), StorageError> {
+    match store.delete(path).await {
+        Ok(()) => Ok(()),
+        Err(object_store::Error::NotFound { .. }) => Ok(()),
+        Err(e) => Err(map_error(e)),
+    }
 }
 
 impl StorageBackend for ObjectStoreBackend {
@@ -170,11 +187,21 @@ impl StorageBackend for ObjectStoreBackend {
         Ok(true)
     }
 
-    async fn list_xorbs(&self) -> Result<Vec<(String, u64)>, StorageError> {
+    async fn delete_xorb(&self, hash: &str) -> Result<(), StorageError> {
+        validate_hash(hash)?;
+        delete_ignoring_missing(&*self.store, &Self::xorb_path(hash)).await
+    }
+
+    async fn delete_shard(&self, hash: &str) -> Result<(), StorageError> {
+        validate_hash(hash)?;
+        delete_ignoring_missing(&*self.store, &Self::shard_path(hash)).await
+    }
+
+    async fn list_xorbs(&self) -> Result<Vec<StoredObject>, StorageError> {
         list_prefix(&*self.store, &ObjectPath::from("xorbs/default")).await
     }
 
-    async fn list_shards(&self) -> Result<Vec<(String, u64)>, StorageError> {
+    async fn list_shards(&self) -> Result<Vec<StoredObject>, StorageError> {
         list_prefix(&*self.store, &ObjectPath::from("shards")).await
     }
 }
@@ -283,10 +310,35 @@ mod tests {
 
         let xorbs = backend.list_xorbs().await.unwrap();
         assert_eq!(xorbs.len(), 2);
-        assert_eq!(xorbs[0].0, TEST_HASH);
-        assert_eq!(xorbs[0].1, 5);
-        assert_eq!(xorbs[1].0, TEST_HASH_2);
-        assert_eq!(xorbs[1].1, 5);
+        assert_eq!(xorbs[0].hash, TEST_HASH);
+        assert_eq!(xorbs[0].size, 5);
+        assert_eq!(xorbs[1].hash, TEST_HASH_2);
+        assert_eq!(xorbs[1].size, 5);
+        assert!(xorbs[0].last_modified_unix > 0);
+    }
+
+    #[tokio::test]
+    async fn test_delete_xorb_and_shard() {
+        let backend = make_backend();
+
+        backend
+            .put_xorb(TEST_HASH, Bytes::from_static(b"data"))
+            .await
+            .unwrap();
+        backend
+            .put_shard(TEST_HASH_2, Bytes::from_static(b"shard"))
+            .await
+            .unwrap();
+
+        backend.delete_xorb(TEST_HASH).await.unwrap();
+        assert!(!backend.xorb_exists(TEST_HASH).await.unwrap());
+
+        backend.delete_shard(TEST_HASH_2).await.unwrap();
+        assert!(backend.list_shards().await.unwrap().is_empty());
+
+        // Deleting again (already gone) is not an error.
+        backend.delete_xorb(TEST_HASH).await.unwrap();
+        backend.delete_shard(TEST_HASH_2).await.unwrap();
     }
 
     #[tokio::test]
@@ -310,7 +362,7 @@ mod tests {
 
         let shards = backend.list_shards().await.unwrap();
         assert_eq!(shards.len(), 1);
-        assert_eq!(shards[0].0, TEST_HASH);
-        assert_eq!(shards[0].1, 6);
+        assert_eq!(shards[0].hash, TEST_HASH);
+        assert_eq!(shards[0].size, 6);
     }
 }

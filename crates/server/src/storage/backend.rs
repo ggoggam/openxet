@@ -18,6 +18,19 @@ pub fn validate_hash(hash: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
+/// Metadata for one stored xorb or shard, as reported by the backing store.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredObject {
+    /// 64-hex content hash (the object's filename).
+    pub hash: String,
+    /// Stored (serialized) size in bytes.
+    pub size: u64,
+    /// Upload time in unix seconds, from the store's own metadata. GC uses
+    /// this for its grace period, so it must reflect when the object landed
+    /// in *this* store, not any client-side timestamp.
+    pub last_modified_unix: i64,
+}
+
 /// Trait for storing and retrieving xorb and shard blobs.
 ///
 /// Implementations must be safe for concurrent use.
@@ -64,11 +77,17 @@ pub trait StorageBackend: Send + Sync {
         data: Bytes,
     ) -> impl Future<Output = Result<bool, StorageError>> + Send;
 
-    /// List all xorbs as (hash, file_size_bytes) pairs.
-    fn list_xorbs(&self) -> impl Future<Output = Result<Vec<(String, u64)>, StorageError>> + Send;
+    /// Delete a xorb. Deleting a missing xorb is not an error.
+    fn delete_xorb(&self, hash: &str) -> impl Future<Output = Result<(), StorageError>> + Send;
 
-    /// List all shards as (hash, file_size_bytes) pairs.
-    fn list_shards(&self) -> impl Future<Output = Result<Vec<(String, u64)>, StorageError>> + Send;
+    /// Delete a shard. Deleting a missing shard is not an error.
+    fn delete_shard(&self, hash: &str) -> impl Future<Output = Result<(), StorageError>> + Send;
+
+    /// List all xorbs with their stored size and upload time.
+    fn list_xorbs(&self) -> impl Future<Output = Result<Vec<StoredObject>, StorageError>> + Send;
+
+    /// List all shards with their stored size and upload time.
+    fn list_shards(&self) -> impl Future<Output = Result<Vec<StoredObject>, StorageError>> + Send;
 }
 
 #[cfg(test)]

@@ -34,6 +34,9 @@ fn extract_bearer_token(parts: &Parts) -> Result<&str, AppError> {
 #[derive(Deserialize)]
 struct OidcClaims {
     exp: usize,
+    /// Subject identity; becomes the accounting owner for uploads.
+    #[serde(default)]
+    sub: String,
 }
 
 /// Map a verified OIDC token onto OpenXet [`Claims`]. Any valid token from an
@@ -46,6 +49,7 @@ fn oidc_claims_to_app_claims(oidc: OidcClaims) -> Claims {
         scope: Scope::Write,
         repo: String::new(),
         exp: oidc.exp,
+        sub: oidc.sub,
     }
 }
 
@@ -125,6 +129,7 @@ async fn authorize(parts: &Parts, state: &AppState, required: Scope) -> Result<C
             scope: Scope::Write,
             repo: String::new(),
             exp: usize::MAX,
+            sub: String::new(),
         });
     }
 
