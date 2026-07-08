@@ -1,8 +1,5 @@
 mod helpers;
 
-use openxet_cas_types::shard::Shard;
-use openxet_hashing::MerkleHash;
-
 use helpers::{TestServer, build_upload_artifacts, generate_test_data, upload_artifacts};
 
 /// A shard that declares a file_hash not matching its actual chunk content must
@@ -17,10 +14,11 @@ async fn test_shard_rejects_mismatched_file_hash() {
     // Happy path: xorbs + a correctly-labeled shard upload succeed.
     upload_artifacts(&server, &artifacts).await;
 
-    // Tamper: keep the same xorbs/terms but claim a bogus file_hash.
-    let mut shard = Shard::from_bytes(&artifacts.shard_bytes).unwrap();
-    shard.file_info_blocks[0].header.file_hash = MerkleHash::from_bytes([0xAB; 32]);
-    let tampered = shard.to_bytes().unwrap();
+    // Tamper: keep the same xorbs/terms but claim a bogus file_hash. In the
+    // upload shard layout the first FileDataSequenceHeader directly follows
+    // the 48-byte shard header, and its first 32 bytes are the file hash.
+    let mut tampered = artifacts.shard_bytes.to_vec();
+    tampered[48..80].copy_from_slice(&[0xAB; 32]);
 
     let resp = server
         .client

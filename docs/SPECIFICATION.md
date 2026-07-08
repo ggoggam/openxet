@@ -383,14 +383,14 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 rou
 
 ## 9. Implementation Plan
 
-### Phase 1: Core Types & Hashing (crates: `cas_types`, `hashing`, `chunking`)
+### Phase 1: Core Types & Hashing (pinned upstream crates: `xet-core-structures`, `xet-data`)
 
-1. **cas_types**: Define `MerkleHash` type with little-endian octet reversal hex encoding/decoding
-2. **hashing**: Implement all 4 hash functions (chunk, merkle internal node, file, verification) using `blake3` crate with keyed hashing
-3. **chunking**: Implement Gearhash CDC with TABLE[256], MASK, min/max enforcement, skip-ahead optimization
-4. **cas_types**: Xorb format serializer/deserializer (chunk header parsing, LZ4 decompression via `lz4_flex`, BG4LZ4)
-5. **cas_types**: Shard format serializer/deserializer (header, file info, CAS info, footer, bookend detection)
-6. **Validation**: Test against reference files from `xet-team/xet-spec-reference-files`
+1. **Hashing**: `MerkleHash`/`DataHash`, all 4 keyed-blake3 hash functions (chunk, merkle internal node, file, verification) come from `xet_core_structures::merklehash` + `metadata_shard::chunk_verification`
+2. **Chunking**: Gearhash CDC via `xet_data::deduplication::Chunker`
+3. **Xorb format**: serialization/validation via `xet_core_structures::xorb_object` (chunk frames, LZ4/BG4LZ4, `XorbObjectInfoV1` footer)
+4. **Shard format**: parse/build via `xet_core_structures::metadata_shard` (`MDBMinimalShard`, `MDBShardInfo`, keyed export for dedup responses)
+5. **cas_types** (workspace crate): only the `/v1` HTTP wire types (reconstruction JSON)
+6. **Validation**: Test against reference files from `xet-team/xet-spec-reference-files` — doubles as the wire-format pin when bumping the pinned crate versions
 
 ### Phase 2: Storage & Index (`crates/server/src/storage/`)
 
@@ -437,10 +437,10 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 rou
 
 | Crate | Purpose |
 |-------|---------|
+| `xet-core-structures` | Hashing + xorb/shard binary formats (pinned upstream) |
+| `xet-data` | Gearhash CDC chunker (pinned upstream) |
 | `axum` | HTTP framework |
 | `tokio` | Async runtime |
-| `blake3` | Keyed hashing (chunk, merkle, file, verification) |
-| `lz4_flex` | LZ4 compression/decompression |
 | `serde` + `serde_json` | JSON serialization |
 | `jsonwebtoken` | JWT auth tokens |
 | `bytes` | Efficient byte buffer handling |

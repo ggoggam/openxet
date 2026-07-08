@@ -2,43 +2,37 @@
 //! for the web UI.
 //!
 //! The Xet wire protocol requires the *client* to chunk, hash, and pack files
-//! (`POST /v1/xorbs`, `POST /v1/shards`). This crate reuses the workspace's own
-//! chunking/hashing/cas-types crates — the same code the server validates
-//! against — so browser uploads are wire-compatible by construction.
+//! (`POST /v1/xorbs`, `POST /v1/shards`). This crate builds on HuggingFace's
+//! own `xet-core-structures` / `xet-data` crates — the same code real
+//! `hf_xet` clients run — so browser uploads are wire-compatible by
+//! construction.
 //!
 //! Upload is a two-phase session (following the Xet put protocol):
 //!
 //! 1. `UploadSession::new(data)` chunks + hashes. JS then drives the global
-//!    dedup loop: `next_query_hash()` → `GET /v1/chunks/default-merkledb/{h}`
+//!    dedup loop: `next_query_batch()` → `GET /v1/chunks/default-merkledb/{h}`
 //!    → on hit, `apply_dedup_shard(bytes)` resolves chunks to existing xorbs.
 //! 2. `finish()` packs only the still-unresolved chunks into new xorbs and
 //!    builds the shard; JS performs the HTTP uploads.
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use std::collections::HashMap;
+use std::io::Cursor;
+
 use wasm_bindgen::prelude::*;
 
-use openxet_cas_types::chunk::CompressionType;
-use openxet_cas_types::shard::{
-    CASChunkSequenceEntry, CASChunkSequenceHeader, CASInfoBlock, FileDataSequenceEntry,
-    FileDataSequenceHeader, FileInfoBlock, FileVerificationEntry, MDB_FILE_FLAG_WITH_VERIFICATION,
-    Shard, ShardHeader,
+use xet_core_structures::merklehash::{MerkleHash, file_hash};
+use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
+use xet_core_structures::metadata_shard::constants::hash_is_global_dedup_eligible;
+use xet_core_structures::metadata_shard::file_structs::{
+    FileDataSequenceEntry, FileDataSequenceHeader, FileVerificationEntry, MDBFileInfo,
 };
-use openxet_cas_types::xorb::{
-    XORB_SOFT_LIMIT, compute_xorb_hash, deserialize_xorb_range, serialize_single_chunk,
+use xet_core_structures::metadata_shard::xorb_structs::{MDBXorbInfo, XorbChunkSequenceHeader};
+use xet_core_structures::metadata_shard::{MDBShardFileHeader, MDBShardInfo};
+use xet_core_structures::xorb_object::constants::{MAX_XORB_BYTES, MAX_XORB_CHUNKS};
+use xet_core_structures::xorb_object::{
+    Chunk, CompressionScheme, RawXorbData, SerializedXorbObject, deserialize_chunks,
 };
-use openxet_chunking::chunk_data;
-use openxet_hashing::{
-    MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
-};
-
-type HmacSha256 = Hmac<Sha256>;
-
-fn hmac_chunk(key: &[u8; 32], hash: &MerkleHash) -> [u8; 32] {
-    let mut mac = HmacSha256::new_from_slice(key).expect("valid key length");
-    mac.update(hash.as_bytes());
-    mac.finalize().into_bytes().into()
-}
+use xet_data::deduplication::Chunker;
 
 /// Where a file chunk lives, once resolved.
 #[derive(Clone)]
@@ -46,14 +40,6 @@ struct Placement {
     xorb_hash: MerkleHash,
     index_in_xorb: u32,
 }
-
-/// Only 1-in-64 chunks are probed against the server in a miss region —
-/// roughly one query per 4 MiB at the 64 KiB target chunk size. A hit
-/// resolves whole xorbs at a time, so re-uploads of existing data still
-/// dedup near-fully; fresh uploads pay ~n/64 probe round trips, not n.
-// ponytail: coarse probe mask; shrink the mask (more probes) if partial-file
-// dedup recall ever matters more than first-upload latency.
-const PROBE_MASK: u8 = 0x3F;
 
 /// Upload artifacts for one file: the xorbs to POST, the shard that registers
 /// the file, and the file's content hash (its identity).
@@ -110,9 +96,7 @@ impl UploadPlan {
 /// Chunk → dedup-query → pack pipeline state for one file upload.
 #[wasm_bindgen]
 pub struct UploadSession {
-    data: Vec<u8>,
-    ranges: Vec<(usize, usize)>, // (offset, length) per chunk
-    chunk_hashes: Vec<MerkleHash>,
+    chunks: Vec<Chunk>,
     placement: Vec<Option<Placement>>,
     probed: Vec<bool>, // chunks already handed out as probe candidates
 }
@@ -124,20 +108,10 @@ impl UploadSession {
         if data.is_empty() {
             return Err(JsError::new("refusing to upload an empty file"));
         }
-        let chunk_infos = chunk_data(&data);
-        let ranges: Vec<(usize, usize)> = chunk_infos
-            .iter()
-            .map(|ci| (ci.offset, ci.length))
-            .collect();
-        let chunk_hashes: Vec<MerkleHash> = ranges
-            .iter()
-            .map(|&(o, l)| compute_chunk_hash(&data[o..o + l]))
-            .collect();
-        let n = chunk_hashes.len();
+        let chunks = Chunker::default().next_block(&data, true);
+        let n = chunks.len();
         Ok(UploadSession {
-            data,
-            ranges,
-            chunk_hashes,
+            chunks,
             placement: vec![None; n],
             probed: vec![false; n],
         })
@@ -151,11 +125,13 @@ impl UploadSession {
     /// candidates, and already-resolved chunks drop out.
     ///
     /// Candidates: the first chunk, the first unresolved chunk after any
-    /// resolved run (the continuation of known data), and 1-in-64 chunks
-    /// inside miss regions. Each chunk is handed out at most once.
+    /// resolved run (the continuation of known data), and chunks that pass
+    /// xet-core's global-dedup eligibility predicate (hash % 1024 == 0, i.e.
+    /// roughly one probe per 64 MiB at the 64 KiB target chunk size). Each
+    /// chunk is handed out at most once.
     pub fn next_query_batch(&mut self, max: usize) -> Vec<String> {
         let mut out = Vec::new();
-        for i in 0..self.chunk_hashes.len() {
+        for i in 0..self.chunks.len() {
             if out.len() >= max {
                 break;
             }
@@ -163,45 +139,49 @@ impl UploadSession {
                 continue;
             }
             let after_resolved = i > 0 && self.placement[i - 1].is_some();
-            let eligible = self.chunk_hashes[i].as_bytes()[0] & PROBE_MASK == 0;
+            let eligible = hash_is_global_dedup_eligible(&self.chunks[i].hash);
             if i == 0 || after_resolved || eligible {
                 self.probed[i] = true;
-                out.push(self.chunk_hashes[i].to_hex());
+                out.push(self.chunks[i].hash.hex());
             }
         }
         out
     }
 
     /// Apply a dedup shard response: HMAC-match our chunk hashes against its
-    /// CAS entries and resolve every covered chunk to its existing xorb.
+    /// (keyed) CAS entries and resolve every covered chunk to its existing
+    /// xorb.
     pub fn apply_dedup_shard(&mut self, bytes: &[u8]) -> Result<(), JsError> {
-        let shard = Shard::from_bytes(bytes)
+        let mut reader = Cursor::new(bytes);
+        let shard_info = MDBShardInfo::load_from_reader(&mut reader)
             .map_err(|e| JsError::new(&format!("parsing dedup shard: {e}")))?;
-        let footer = shard
-            .footer
-            .as_ref()
-            .ok_or_else(|| JsError::new("dedup shard missing footer"))?;
-        let key = &footer.chunk_hash_hmac_key;
+        let Some(key) = shard_info.chunk_hmac_key() else {
+            return Err(JsError::new("dedup shard missing hmac key"));
+        };
 
-        // HMAC(chunk_hash) -> (xorb_hash, index_in_xorb)
-        let mut by_hmac = std::collections::HashMap::new();
-        for block in &shard.cas_info_blocks {
-            for (idx, entry) in block.entries.iter().enumerate() {
-                by_hmac.insert(
-                    *entry.chunk_hash.as_bytes(),
+        let xorb_blocks = shard_info
+            .read_all_xorb_blocks_full(&mut reader)
+            .map_err(|e| JsError::new(&format!("reading dedup shard xorb blocks: {e}")))?;
+
+        // keyed chunk hash -> (xorb_hash, index_in_xorb)
+        let mut by_keyed_hash = HashMap::new();
+        for block in &xorb_blocks {
+            for (idx, entry) in block.chunks.iter().enumerate() {
+                by_keyed_hash.insert(
+                    entry.chunk_hash,
                     Placement {
-                        xorb_hash: block.header.cas_hash,
+                        xorb_hash: block.metadata.xorb_hash,
                         index_in_xorb: idx as u32,
                     },
                 );
             }
         }
 
-        for j in 0..self.chunk_hashes.len() {
+        for j in 0..self.chunks.len() {
             if self.placement[j].is_some() {
                 continue;
             }
-            if let Some(p) = by_hmac.get(&hmac_chunk(key, &self.chunk_hashes[j])) {
+            if let Some(p) = by_keyed_hash.get(&self.chunks[j].hash.hmac(key)) {
                 self.placement[j] = Some(p.clone());
             }
         }
@@ -212,98 +192,102 @@ impl UploadSession {
     /// The session is consumed; use the returned plan for the HTTP uploads.
     pub fn finish(&mut self) -> Result<UploadPlan, JsError> {
         build_plan(
-            std::mem::take(&mut self.data),
-            std::mem::take(&mut self.ranges),
-            std::mem::take(&mut self.chunk_hashes),
+            std::mem::take(&mut self.chunks),
             std::mem::take(&mut self.placement),
         )
         .map_err(|e| JsError::new(&e))
     }
 }
 
+/// Serialize one group of chunks into a xorb: LZ4-compressed chunk frames
+/// followed by the metadata footer real xet-core clients also write.
+fn seal_xorb(chunks: &[Chunk]) -> Result<(MerkleHash, MDBXorbInfo, Vec<u8>), String> {
+    let raw = RawXorbData::from_chunks(chunks, vec![0]);
+    let xorb_hash = raw.hash();
+    let mut xorb_info = raw.xorb_info.clone();
+
+    let serialized = SerializedXorbObject::from_xorb_with_compression(
+        raw,
+        CompressionScheme::LZ4,
+        /* serialize_footer= */ true,
+    )
+    .map_err(|e| format!("serializing xorb: {e}"))?;
+
+    xorb_info.metadata.num_bytes_on_disk = serialized.serialized_data.len() as u32;
+    Ok((xorb_hash, xorb_info, serialized.serialized_data))
+}
+
 /// Pack new chunks into xorbs, coalesce placements into reconstruction terms,
 /// and build the upload shard (the final steps of the Xet put protocol).
 fn build_plan(
-    data: Vec<u8>,
-    ranges: Vec<(usize, usize)>,
-    chunk_hashes: Vec<MerkleHash>,
+    chunks: Vec<Chunk>,
     mut placement: Vec<Option<Placement>>,
 ) -> Result<UploadPlan, String> {
-    let n = chunk_hashes.len();
-    let sizes: Vec<usize> = ranges.iter().map(|&(_, l)| l).collect();
-    let slice = |i: usize| -> &[u8] {
-        let (o, l) = ranges[i];
-        &data[o..o + l]
-    };
+    let n = chunks.len();
 
-    let hashes_and_sizes: Vec<(MerkleHash, usize)> = chunk_hashes
+    let hashes_and_sizes: Vec<(MerkleHash, u64)> = chunks
         .iter()
-        .copied()
-        .zip(sizes.iter().copied())
+        .map(|c| (c.hash, c.data.len() as u64))
         .collect();
-    let file_hash = compute_file_hash(&hashes_and_sizes);
+    let file_hash = file_hash(&hashes_and_sizes);
     let deduped_chunk_count = placement.iter().filter(|p| p.is_some()).count();
 
-    // Pack unresolved chunks into new xorbs (greedy fill by serialized size).
-    // `built` records each new xorb's hash and the global chunk indices it
-    // holds, in order.
+    // Pack unresolved chunks into new xorbs, cutting at xet-core's raw-byte
+    // and chunk-count thresholds.
     let mut xorbs: Vec<(String, Vec<u8>)> = Vec::new();
-    let mut built: Vec<(MerkleHash, Vec<usize>)> = Vec::new();
+    let mut new_xorb_infos: Vec<MDBXorbInfo> = Vec::new();
     {
-        fn seal(
-            group: &mut Vec<usize>,
-            buf: &mut Vec<u8>,
-            chunk_hashes: &[MerkleHash],
-            sizes: &[usize],
-            placement: &mut [Option<Placement>],
-            xorbs: &mut Vec<(String, Vec<u8>)>,
-            built: &mut Vec<(MerkleHash, Vec<usize>)>,
-        ) {
-            let group_hs: Vec<(MerkleHash, usize)> =
-                group.iter().map(|&k| (chunk_hashes[k], sizes[k])).collect();
-            let xorb_hash = compute_xorb_hash(&group_hs);
-            for (local_idx, &gi) in group.iter().enumerate() {
-                placement[gi] = Some(Placement {
+        let mut group: Vec<usize> = Vec::new();
+        let mut group_bytes = 0usize;
+
+        let seal = |group: &mut Vec<usize>,
+                    group_bytes: &mut usize,
+                    placement: &mut Vec<Option<Placement>>,
+                    xorbs: &mut Vec<(String, Vec<u8>)>,
+                    new_xorb_infos: &mut Vec<MDBXorbInfo>|
+         -> Result<(), String> {
+            let group_chunks: Vec<Chunk> = group.iter().map(|&k| chunks[k].clone()).collect();
+            let (xorb_hash, xorb_info, bytes) = seal_xorb(&group_chunks)?;
+            for (local_idx, &global_idx) in group.iter().enumerate() {
+                placement[global_idx] = Some(Placement {
                     xorb_hash,
                     index_in_xorb: local_idx as u32,
                 });
             }
-            xorbs.push((xorb_hash.to_hex(), std::mem::take(buf)));
-            built.push((xorb_hash, std::mem::take(group)));
-        }
+            xorbs.push((xorb_hash.hex(), bytes));
+            new_xorb_infos.push(xorb_info);
+            group.clear();
+            *group_bytes = 0;
+            Ok(())
+        };
 
-        let mut group: Vec<usize> = Vec::new();
-        let mut buf: Vec<u8> = Vec::new();
         for idx in 0..n {
             if placement[idx].is_some() {
                 continue;
             }
-            let serialized = serialize_single_chunk(slice(idx), CompressionType::Lz4)
-                .map_err(|e| e.to_string())?;
-            if !buf.is_empty() && buf.len() + serialized.len() > XORB_SOFT_LIMIT {
+            let len = chunks[idx].data.len();
+            if !group.is_empty()
+                && (group_bytes + len > *MAX_XORB_BYTES || group.len() >= *MAX_XORB_CHUNKS)
+            {
                 seal(
                     &mut group,
-                    &mut buf,
-                    &chunk_hashes,
-                    &sizes,
+                    &mut group_bytes,
                     &mut placement,
                     &mut xorbs,
-                    &mut built,
-                );
+                    &mut new_xorb_infos,
+                )?;
             }
-            buf.extend_from_slice(&serialized);
             group.push(idx);
+            group_bytes += len;
         }
         if !group.is_empty() {
             seal(
                 &mut group,
-                &mut buf,
-                &chunk_hashes,
-                &sizes,
+                &mut group_bytes,
                 &mut placement,
                 &mut xorbs,
-                &mut built,
-            );
+                &mut new_xorb_infos,
+            )?;
         }
     }
 
@@ -314,6 +298,7 @@ fn build_plan(
 
     // Coalesce consecutive chunks sharing a xorb + adjacent indices into
     // reconstruction terms; one verification entry per term.
+    let chunk_hashes: Vec<MerkleHash> = chunks.iter().map(|c| c.hash).collect();
     let mut entries: Vec<FileDataSequenceEntry> = Vec::new();
     let mut verifications: Vec<FileVerificationEntry> = Vec::new();
     let mut t = 0;
@@ -330,70 +315,61 @@ fn build_plan(
             end += 1;
         }
 
-        entries.push(FileDataSequenceEntry {
-            cas_hash: xorb,
-            cas_flags: 0,
-            unpacked_segment_bytes: (t..end).map(|k| sizes[k] as u32).sum(),
-            chunk_index_start: start_idx,
-            chunk_index_end: placement[end - 1].index_in_xorb + 1,
-        });
-        verifications.push(FileVerificationEntry {
-            range_hash: compute_verification_hash(&chunk_hashes[t..end]),
-        });
+        let unpacked: u32 = (t..end).map(|k| chunks[k].data.len() as u32).sum();
+        entries.push(FileDataSequenceEntry::new(
+            xorb,
+            unpacked,
+            start_idx,
+            placement[end - 1].index_in_xorb + 1,
+        ));
+        verifications.push(FileVerificationEntry::new(range_hash_from_chunks(
+            &chunk_hashes[t..end],
+        )));
         t = end;
     }
 
+    // Upload shard format: header with footer_size=0, file info section,
+    // bookend, xorb (CAS) info section, bookend — no lookup tables or footer
+    // (xet-core strips those before uploading too).
+    let file_info = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(
+            file_hash,
+            entries.len(),
+            /* contains_verification= */ true,
+            /* contains_metadata_ext= */ false,
+        ),
+        segments: entries,
+        verification: verifications,
+        metadata_ext: None,
+    };
+
+    let mut shard_bytes = Vec::new();
+    let header = MDBShardFileHeader {
+        footer_size: 0,
+        ..Default::default()
+    };
+    header
+        .serialize(&mut shard_bytes)
+        .map_err(|e| e.to_string())?;
+    file_info
+        .serialize(&mut shard_bytes)
+        .map_err(|e| e.to_string())?;
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .map_err(|e| e.to_string())?;
     // CAS info only for the xorbs built this run — existing ones are already
     // registered server-side.
-    let cas_info_blocks: Vec<CASInfoBlock> = built
-        .iter()
-        .zip(&xorbs)
-        .map(|((xorb_hash, group), (_, bytes))| {
-            let mut byte_offset = 0u32;
-            let cas_entries: Vec<CASChunkSequenceEntry> = group
-                .iter()
-                .map(|&k| {
-                    let entry = CASChunkSequenceEntry {
-                        chunk_hash: chunk_hashes[k],
-                        chunk_byte_range_start: byte_offset,
-                        unpacked_segment_bytes: sizes[k] as u32,
-                    };
-                    byte_offset += sizes[k] as u32;
-                    entry
-                })
-                .collect();
-            CASInfoBlock {
-                header: CASChunkSequenceHeader {
-                    cas_hash: *xorb_hash,
-                    cas_flags: 0,
-                    num_entries: cas_entries.len() as u32,
-                    num_bytes_in_cas: byte_offset,
-                    num_bytes_on_disk: bytes.len() as u32,
-                },
-                entries: cas_entries,
-            }
-        })
-        .collect();
-
-    let shard = Shard {
-        header: ShardHeader::new(0),
-        file_info_blocks: vec![FileInfoBlock {
-            header: FileDataSequenceHeader {
-                file_hash,
-                file_flags: MDB_FILE_FLAG_WITH_VERIFICATION,
-                num_entries: entries.len() as u32,
-            },
-            entries,
-            verification_entries: verifications,
-            metadata_ext: None,
-        }],
-        cas_info_blocks,
-        footer: None,
-    };
-    let shard_bytes = shard.to_upload_bytes().map_err(|e| e.to_string())?;
+    for xorb_info in &new_xorb_infos {
+        xorb_info
+            .serialize(&mut shard_bytes)
+            .map_err(|e| e.to_string())?;
+    }
+    XorbChunkSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .map_err(|e| e.to_string())?;
 
     Ok(UploadPlan {
-        file_hash: file_hash.to_hex(),
+        file_hash: file_hash.hex(),
         chunk_count: n,
         deduped_chunk_count,
         xorbs,
@@ -407,9 +383,21 @@ fn build_plan(
 /// `term.range` shifted by the fetch info's `range.start`.
 #[wasm_bindgen]
 pub fn decode_chunks(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, JsError> {
-    let chunks = deserialize_xorb_range(data, start, end)
-        .map_err(|e| JsError::new(&format!("decoding chunks: {e}")))?;
-    Ok(chunks.into_iter().flat_map(|c| c.data).collect())
+    decode_chunks_impl(data, start, end).map_err(|e| JsError::new(&e))
+}
+
+fn decode_chunks_impl(data: &[u8], start: usize, end: usize) -> Result<Vec<u8>, String> {
+    let (bytes, boundaries) =
+        deserialize_chunks(&mut Cursor::new(data)).map_err(|e| format!("decoding chunks: {e}"))?;
+
+    // `boundaries` holds cumulative uncompressed offsets starting with 0.
+    if start > end || end >= boundaries.len() {
+        return Err(format!(
+            "chunk range [{start},{end}) out of bounds for {} chunks",
+            boundaries.len().saturating_sub(1)
+        ));
+    }
+    Ok(bytes[boundaries[start] as usize..boundaries[end] as usize].to_vec())
 }
 
 /// One-shot plan without global dedup (kept for tests and non-dedup callers).
@@ -422,21 +410,18 @@ pub fn build_upload_plan(data: &[u8]) -> Result<UploadPlan, String> {
     if data.is_empty() {
         return Err("refusing to upload an empty file".to_string());
     }
-    let chunk_infos = chunk_data(data);
-    let ranges: Vec<(usize, usize)> = chunk_infos
-        .iter()
-        .map(|ci| (ci.offset, ci.length))
-        .collect();
-    let chunk_hashes: Vec<MerkleHash> = ranges
-        .iter()
-        .map(|&(o, l)| compute_chunk_hash(&data[o..o + l]))
-        .collect();
-    let n = chunk_hashes.len();
-    build_plan(data.to_vec(), ranges, chunk_hashes, vec![None; n])
+    let chunks = Chunker::default().next_block(data, true);
+    let n = chunks.len();
+    build_plan(chunks, vec![None; n])
 }
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use xet_core_structures::metadata_shard::shard_in_memory::MDBInMemoryShard;
+    use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
+
     use super::*;
 
     fn test_data() -> Vec<u8> {
@@ -453,21 +438,30 @@ mod tests {
         assert_eq!(plan.deduped_chunk_count, 0);
         assert_eq!(plan.xorbs.len(), 1); // 512 KiB fits one xorb
 
-        // The xorb round-trips to the original bytes
-        let chunks = openxet_cas_types::xorb::deserialize_xorb(&plan.xorbs[0].1).unwrap();
-        let total: usize = chunks.iter().map(|c| c.data.len()).sum();
-        assert_eq!(total, data.len());
-        let rebuilt: Vec<u8> = chunks.into_iter().flat_map(|c| c.data).collect();
+        // The xorb round-trips to the original bytes via its metadata footer
+        let mut cursor = Cursor::new(&plan.xorbs[0].1[..]);
+        let xorb = xet_core_structures::xorb_object::XorbObject::deserialize(&mut cursor).unwrap();
+        assert_eq!(xorb.info.num_chunks as usize, plan.chunk_count);
+        let rebuilt = xorb.get_all_bytes(&mut cursor).unwrap();
         assert_eq!(rebuilt, data);
 
+        // decode_chunks handles a fetched chunk-range slice (frames only, no
+        // footer), the shape reconstruction fetch_info URLs return.
+        let (start, end) = xorb.get_byte_offset(0, xorb.info.num_chunks).unwrap();
+        let slice = &plan.xorbs[0].1[start as usize..end as usize];
+        let decoded = decode_chunks_impl(slice, 0, plan.chunk_count).unwrap();
+        assert_eq!(decoded, data);
+
         // The shard parses and references the file + xorb consistently
-        let shard = Shard::from_bytes(&plan.shard_bytes).unwrap();
-        assert_eq!(shard.file_info_blocks.len(), 1);
-        let fb = &shard.file_info_blocks[0];
-        assert_eq!(fb.header.file_hash.to_hex(), plan.file_hash);
-        assert_eq!(fb.entries.len(), 1);
-        assert_eq!(fb.entries[0].cas_hash.to_hex(), plan.xorbs[0].0);
-        assert_eq!(fb.entries[0].unpacked_segment_bytes as usize, data.len());
+        let shard =
+            MDBMinimalShard::from_reader(&mut Cursor::new(&plan.shard_bytes[..]), true, true)
+                .unwrap();
+        assert_eq!(shard.num_files(), 1);
+        let fv = shard.file(0).unwrap();
+        assert_eq!(fv.file_hash().hex(), plan.file_hash);
+        assert_eq!(fv.num_entries(), 1);
+        assert_eq!(fv.entry(0).xorb_hash.hex(), plan.xorbs[0].0);
+        assert_eq!(fv.entry(0).unpacked_segment_bytes as usize, data.len());
     }
 
     #[test]
@@ -504,47 +498,34 @@ mod tests {
     #[test]
     fn full_dedup_uploads_no_xorbs() {
         let data = test_data();
-        // First upload registers the xorb; feed its CAS info back as a dedup
-        // shard (HMAC key = the identity path is exercised with a real key).
+        // First upload registers the xorb; feed its CAS info back as a keyed
+        // dedup shard, exactly like the server builds one.
         let first = build_upload_plan(&data).unwrap();
-        let first_shard = Shard::from_bytes(&first.shard_bytes).unwrap();
+        let first_shard =
+            MDBMinimalShard::from_reader(&mut Cursor::new(&first.shard_bytes[..]), true, true)
+                .unwrap();
 
-        // Build a dedup-style response: same CAS blocks, HMAC'd chunk hashes.
-        let key = [7u8; 32];
-        let cas_info_blocks: Vec<CASInfoBlock> = first_shard
-            .cas_info_blocks
-            .iter()
-            .map(|b| CASInfoBlock {
-                header: b.header.clone(),
-                entries: b
-                    .entries
-                    .iter()
-                    .map(|e| CASChunkSequenceEntry {
-                        chunk_hash: MerkleHash::from_bytes(hmac_chunk(&key, &e.chunk_hash)),
-                        ..e.clone()
-                    })
-                    .collect(),
-            })
-            .collect();
-        let dedup_shard = Shard {
-            header: openxet_cas_types::shard::ShardHeader {
-                tag: openxet_cas_types::shard::MDB_SHARD_HEADER_TAG,
-                version: openxet_cas_types::shard::MDB_SHARD_HEADER_VERSION,
-                footer_size: openxet_cas_types::shard::FOOTER_SIZE as u64,
-            },
-            file_info_blocks: vec![],
-            cas_info_blocks,
-            footer: Some(openxet_cas_types::shard::ShardFooter {
-                version: openxet_cas_types::shard::MDB_SHARD_FOOTER_VERSION,
-                file_info_offset: 0,
-                cas_info_offset: 0,
-                chunk_hash_hmac_key: key,
-                shard_creation_timestamp: 0,
-                shard_key_expiry: u64::MAX,
-                footer_offset: 0,
-            }),
-        };
-        let dedup_bytes = dedup_shard.to_bytes().unwrap();
+        let mut mem_shard = MDBInMemoryShard::default();
+        for i in 0..first_shard.num_xorb() {
+            let info: MDBXorbInfo = first_shard.xorb(i).unwrap().into();
+            mem_shard.add_xorb_block(info).unwrap();
+        }
+        let mut unkeyed = Vec::new();
+        let shard_info = MDBShardInfo::serialize_from(&mut unkeyed, &mem_shard, None).unwrap();
+
+        let key = MerkleHash::from([7u8; 32]);
+        let mut dedup_bytes = Vec::new();
+        shard_info
+            .export_as_keyed_shard(
+                &mut Cursor::new(&unkeyed[..]),
+                &mut dedup_bytes,
+                key,
+                Duration::from_secs(3600),
+                false,
+                true,
+                true,
+            )
+            .unwrap();
 
         let mut session = UploadSession::new(data).unwrap();
         let batch = session.next_query_batch(16);
@@ -563,10 +544,12 @@ mod tests {
 
         // Shard still references the existing xorb for reconstruction, with
         // no CAS info (nothing new was built).
-        let shard = Shard::from_bytes(&plan.shard_bytes).unwrap();
-        assert_eq!(shard.cas_info_blocks.len(), 0);
+        let shard =
+            MDBMinimalShard::from_reader(&mut Cursor::new(&plan.shard_bytes[..]), true, true)
+                .unwrap();
+        assert_eq!(shard.num_xorb(), 0);
         assert_eq!(
-            shard.file_info_blocks[0].entries[0].cas_hash.to_hex(),
+            shard.file(0).unwrap().entry(0).xorb_hash.hex(),
             first.xorbs[0].0
         );
     }

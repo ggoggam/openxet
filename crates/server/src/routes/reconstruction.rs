@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::Cursor;
 use std::time::Duration;
 
 use axum::Json;
@@ -6,15 +7,16 @@ use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use futures::stream::{self, StreamExt, TryStreamExt};
 
-use openxet_cas_types::chunk::ChunkHeader;
 use openxet_cas_types::reconstruction::{
     ByteRange, CASReconstructionFetchInfo, CASReconstructionTerm, ChunkRange,
     QueryReconstructionResponse,
 };
-use openxet_cas_types::shard::Shard;
+use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
+use xet_core_structures::xorb_object::XORB_CHUNK_HEADER_LENGTH;
 
 use crate::auth::RequireRead;
 use crate::error::AppError;
+use crate::routes::xorb_meta::{chunk_byte_offsets, xorb_info_from_stored};
 use crate::state::AppState;
 use crate::storage::index::XorbLayout;
 use crate::storage::{ChunkIndex, FileIndex, StorageBackend, validate_hash};
@@ -57,31 +59,9 @@ fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppErro
     Ok(Some((start, end)))
 }
 
-/// Compute byte offsets for each chunk within a serialized xorb by walking chunk headers.
-/// Returns a list of (offset_start, offset_end) byte positions in the xorb binary for each chunk.
-fn compute_chunk_byte_offsets(xorb_data: &[u8]) -> Vec<(u64, u64)> {
-    let mut offsets = Vec::new();
-    let mut pos = 0usize;
-
-    while pos + ChunkHeader::SIZE <= xorb_data.len() {
-        let header_bytes: [u8; 8] = xorb_data[pos..pos + 8].try_into().unwrap();
-        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-            break;
-        };
-
-        let chunk_start = pos as u64;
-        let chunk_end = (pos + ChunkHeader::SIZE + header.compressed_size as usize) as u64;
-        offsets.push((chunk_start, chunk_end));
-
-        pos = chunk_end as usize;
-    }
-
-    offsets
-}
-
-/// Compute the same `(offset_start, offset_end)` byte positions as
-/// [`compute_chunk_byte_offsets`], but from a recorded [`XorbLayout`] instead of
-/// the xorb bytes — no object-store fetch. Each chunk occupies its 8-byte header
+/// Compute the same `(offset_start, offset_end)` physical byte positions as
+/// [`chunk_byte_offsets`], but from a recorded [`XorbLayout`] instead of the
+/// xorb bytes — no object-store fetch. Each chunk occupies its 8-byte header
 /// plus its compressed data, so offsets are the running sum of those spans.
 ///
 /// Returns `None` when the layout predates recorded compressed sizes (any chunk
@@ -95,7 +75,7 @@ fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>
     let mut pos = 0u64;
     for chunk in &layout.chunks {
         let chunk_start = pos;
-        let chunk_end = pos + ChunkHeader::SIZE as u64 + chunk.compressed_size as u64;
+        let chunk_end = pos + XORB_CHUNK_HEADER_LENGTH as u64 + chunk.compressed_size as u64;
         offsets.push((chunk_start, chunk_end));
         pos = chunk_end;
     }
@@ -118,16 +98,15 @@ pub async fn get_reconstruction(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("file not found: {file_id}")))?;
 
-    // Read and parse the shard
+    // Read and parse the shard (stored shards are upload-format: no footer)
     let shard_data = state.storage.get_shard(&shard_hash).await?;
-    let shard = Shard::from_bytes(&shard_data)
+    let shard = MDBMinimalShard::from_reader(&mut Cursor::new(&shard_data[..]), true, false)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("corrupt shard {shard_hash}: {e}")))?;
 
     // Find the file info block for this file_id
-    let file_block = shard
-        .file_info_blocks
-        .iter()
-        .find(|b| b.header.file_hash.to_hex() == file_id)
+    let file_view = (0..shard.num_files())
+        .filter_map(|i| shard.file(i))
+        .find(|fv| fv.file_hash().hex() == file_id)
         .ok_or_else(|| {
             AppError::Internal(anyhow::anyhow!(
                 "file {file_id} not found in shard {shard_hash}"
@@ -135,16 +114,17 @@ pub async fn get_reconstruction(
         })?;
 
     // Build the initial terms list
-    let mut terms: Vec<CASReconstructionTerm> = file_block
-        .entries
-        .iter()
-        .map(|entry| CASReconstructionTerm {
-            hash: entry.cas_hash.to_hex(),
-            unpacked_length: entry.unpacked_segment_bytes as u64,
-            range: ChunkRange {
-                start: entry.chunk_index_start as usize,
-                end: entry.chunk_index_end as usize,
-            },
+    let mut terms: Vec<CASReconstructionTerm> = (0..file_view.num_entries())
+        .map(|i| {
+            let entry = file_view.entry(i);
+            CASReconstructionTerm {
+                hash: entry.xorb_hash.hex(),
+                unpacked_length: entry.unpacked_segment_bytes as u64,
+                range: ChunkRange {
+                    start: entry.chunk_index_start as usize,
+                    end: entry.chunk_index_end as usize,
+                },
+            }
         })
         .collect();
 
@@ -226,10 +206,14 @@ pub async fn get_reconstruction(
                     Some(layout) => match chunk_byte_offsets_from_layout(&layout) {
                         Some(offsets) => offsets,
                         None => {
-                            compute_chunk_byte_offsets(&state.storage.get_xorb(&term.hash).await?)
+                            let xorb_data = state.storage.get_xorb(&term.hash).await?;
+                            chunk_byte_offsets(&xorb_info_from_stored(&xorb_data)?)
                         }
                     },
-                    None => compute_chunk_byte_offsets(&state.storage.get_xorb(&term.hash).await?),
+                    None => {
+                        let xorb_data = state.storage.get_xorb(&term.hash).await?;
+                        chunk_byte_offsets(&xorb_info_from_stored(&xorb_data)?)
+                    }
                 };
 
                 // Build fetch info covering the chunks this term needs

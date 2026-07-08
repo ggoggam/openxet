@@ -1,72 +1,23 @@
 use std::collections::HashMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::io::Cursor;
+use std::time::Duration;
 
 use axum::extract::{Path, State};
 use axum::http::header;
 use axum::response::IntoResponse;
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 
-use openxet_cas_types::chunk::ChunkHeader;
-use openxet_cas_types::shard::{
-    CASChunkSequenceEntry, CASChunkSequenceHeader, CASInfoBlock, FOOTER_SIZE,
-    MDB_SHARD_FOOTER_VERSION, MDB_SHARD_HEADER_VERSION, Shard, ShardFooter, ShardHeader,
+use xet_core_structures::merklehash::MerkleHash;
+use xet_core_structures::metadata_shard::MDBShardInfo;
+use xet_core_structures::metadata_shard::shard_in_memory::MDBInMemoryShard;
+use xet_core_structures::metadata_shard::xorb_structs::{
+    MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader,
 };
-use openxet_hashing::MerkleHash;
 
 use crate::auth::RequireRead;
 use crate::error::AppError;
+use crate::routes::xorb_meta::{chunk_info_triples, xorb_info_from_stored};
 use crate::state::AppState;
 use crate::storage::{ChunkIndex, StorageBackend, validate_hash};
-
-type HmacSha256 = Hmac<Sha256>;
-
-/// HMAC a MerkleHash with the given key, returning a new MerkleHash.
-fn hmac_hash(key: &[u8; 32], hash: &MerkleHash) -> MerkleHash {
-    let mut mac =
-        HmacSha256::new_from_slice(key).expect("HMAC key length is always valid for SHA256");
-    mac.update(hash.as_bytes());
-    let result = mac.finalize().into_bytes();
-    MerkleHash::from_bytes(result.into())
-}
-
-/// Parse chunk hashes from a xorb binary by walking chunk headers.
-fn parse_xorb_chunk_hashes(xorb_data: &[u8]) -> Vec<(MerkleHash, u32, u32)> {
-    let mut result = Vec::new();
-    let mut pos = 0usize;
-    let mut byte_offset = 0u32;
-
-    while pos + ChunkHeader::SIZE <= xorb_data.len() {
-        let header_bytes: [u8; 8] = xorb_data[pos..pos + 8].try_into().unwrap();
-        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-            break;
-        };
-
-        let compressed_start = pos + ChunkHeader::SIZE;
-        let compressed_end = compressed_start + header.compressed_size as usize;
-        if compressed_end > xorb_data.len() {
-            break;
-        }
-
-        // Decompress to compute the chunk hash
-        let compressed = &xorb_data[compressed_start..compressed_end];
-        let decompressed = openxet_cas_types::chunk::decompress_chunk(
-            compressed,
-            header.compression_type,
-            header.uncompressed_size as usize,
-        );
-
-        if let Ok(data) = decompressed {
-            let chunk_hash = openxet_hashing::compute_chunk_hash(&data);
-            result.push((chunk_hash, byte_offset, data.len() as u32));
-        }
-
-        byte_offset += header.uncompressed_size;
-        pos = compressed_end;
-    }
-
-    result
-}
 
 pub async fn get_dedup(
     State(state): State<AppState>,
@@ -91,17 +42,17 @@ pub async fn get_dedup(
             .push(loc.chunk_index);
     }
 
-    // Generate random HMAC key
-    let hmac_key: [u8; 32] = rand::random();
-
-    // Build CAS info blocks
-    let mut cas_info_blocks = Vec::new();
+    // Assemble the response shard's xorb blocks with *raw* chunk hashes;
+    // export_as_keyed_shard below applies the HMAC key to every chunk hash
+    // and stamps the key + expiry into the footer, exactly the shape
+    // xet-core clients expect from a global-dedup query.
+    let mut mem_shard = MDBInMemoryShard::default();
 
     for xorb_hash_hex in xorb_map.keys() {
         let xorb_hash = MerkleHash::from_hex(xorb_hash_hex)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("bad stored hash: {e}")))?;
 
-        // Prefer the recorded layout (no object-store fetch, no decompression);
+        // Prefer the recorded layout (no object-store fetch, no parsing);
         // fall back to reading the xorb for entries stored before layouts were
         // recorded. Both yield (chunk_hash, byte_offset, uncompressed_size).
         let (chunk_info, num_bytes_on_disk): (Vec<(MerkleHash, u32, u32)>, u32) =
@@ -121,61 +72,52 @@ pub async fn get_dedup(
                 None => {
                     let xorb_data = state.storage.get_xorb(xorb_hash_hex).await?;
                     let on_disk = xorb_data.len() as u32;
-                    (parse_xorb_chunk_hashes(&xorb_data), on_disk)
+                    let info = xorb_info_from_stored(&xorb_data)?;
+                    (chunk_info_triples(&info), on_disk)
                 }
             };
 
         let total_uncompressed: u32 = chunk_info.iter().map(|(_, _, size)| size).sum();
 
-        let entries: Vec<CASChunkSequenceEntry> = chunk_info
+        let entries: Vec<XorbChunkSequenceEntry> = chunk_info
             .iter()
-            .map(|(ch, byte_start, size)| CASChunkSequenceEntry {
-                chunk_hash: hmac_hash(&hmac_key, ch),
-                chunk_byte_range_start: *byte_start,
-                unpacked_segment_bytes: *size,
+            .map(|(chunk_hash, byte_start, size)| {
+                XorbChunkSequenceEntry::new(*chunk_hash, *size, *byte_start)
             })
             .collect();
 
-        cas_info_blocks.push(CASInfoBlock {
-            header: CASChunkSequenceHeader {
-                cas_hash: xorb_hash,
-                cas_flags: 0,
-                num_entries: entries.len() as u32,
-                num_bytes_in_cas: total_uncompressed,
-                num_bytes_on_disk,
-            },
-            entries,
-        });
+        let mut header = XorbChunkSequenceHeader::new(xorb_hash, entries.len(), total_uncompressed);
+        header.num_bytes_on_disk = num_bytes_on_disk;
+
+        mem_shard
+            .add_xorb_block(MDBXorbInfo {
+                metadata: header,
+                chunks: entries,
+            })
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("assembling dedup shard: {e}")))?;
     }
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    // Serialize unkeyed, then re-export keyed: a fresh random HMAC key per
+    // response, valid for the configured TTL.
+    let mut unkeyed = Vec::new();
+    let shard_info = MDBShardInfo::serialize_from(&mut unkeyed, &mem_shard, None)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("serializing dedup shard: {e}")))?;
 
-    // Build the shard with footer
-    let shard = Shard {
-        header: ShardHeader {
-            tag: openxet_cas_types::shard::MDB_SHARD_HEADER_TAG,
-            version: MDB_SHARD_HEADER_VERSION,
-            footer_size: FOOTER_SIZE as u64,
-        },
-        file_info_blocks: vec![], // dedup responses have no file info
-        cas_info_blocks,
-        footer: Some(ShardFooter {
-            version: MDB_SHARD_FOOTER_VERSION,
-            file_info_offset: 0,
-            cas_info_offset: 0,
-            chunk_hash_hmac_key: hmac_key,
-            shard_creation_timestamp: now,
-            shard_key_expiry: now + state.config.auth.shard_key_ttl_seconds,
-            footer_offset: 0,
-        }),
-    };
+    let hmac_key: MerkleHash = rand::random::<[u8; 32]>().into();
+    let key_ttl = Duration::from_secs(state.config.auth.shard_key_ttl_seconds);
 
-    let shard_bytes = shard
-        .to_bytes()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("failed to serialize shard: {e}")))?;
+    let mut shard_bytes = Vec::new();
+    shard_info
+        .export_as_keyed_shard(
+            &mut Cursor::new(&unkeyed[..]),
+            &mut shard_bytes,
+            hmac_key,
+            key_ttl,
+            false, // no file info in dedup responses
+            true,  // xorb lookup table
+            true,  // chunk lookup table (what clients query against)
+        )
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("keying dedup shard: {e}")))?;
 
     Ok((
         [(header::CONTENT_TYPE, "application/octet-stream")],

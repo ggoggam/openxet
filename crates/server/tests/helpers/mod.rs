@@ -3,20 +3,19 @@ use std::sync::Arc;
 use bytes::Bytes;
 use tokio::net::TcpListener;
 
-use openxet_cas_types::chunk::CompressionType;
 use openxet_cas_types::reconstruction::QueryReconstructionResponse;
-use openxet_cas_types::shard::{
-    CASChunkSequenceEntry, CASChunkSequenceHeader, CASInfoBlock, FileDataSequenceEntry,
-    FileDataSequenceHeader, FileInfoBlock, FileVerificationEntry, MDB_FILE_FLAG_WITH_VERIFICATION,
-    Shard, ShardHeader,
+use xet_core_structures::merklehash::{MerkleHash, file_hash};
+use xet_core_structures::metadata_shard::MDBShardFileHeader;
+use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
+use xet_core_structures::metadata_shard::file_structs::{
+    FileDataSequenceEntry, FileDataSequenceHeader, FileVerificationEntry, MDBFileInfo,
 };
-use openxet_cas_types::xorb::{
-    XORB_SOFT_LIMIT, compute_xorb_hash, deserialize_xorb, serialize_single_chunk,
+use xet_core_structures::metadata_shard::xorb_structs::{MDBXorbInfo, XorbChunkSequenceHeader};
+use xet_core_structures::xorb_object::constants::{MAX_XORB_BYTES, MAX_XORB_CHUNKS};
+use xet_core_structures::xorb_object::{
+    Chunk, CompressionScheme, RawXorbData, SerializedXorbObject, deserialize_chunks,
 };
-use openxet_chunking::chunk_data;
-use openxet_hashing::{
-    MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
-};
+use xet_data::deduplication::Chunker;
 
 use openxet_server::auth::{Claims, Scope, create_token};
 use openxet_server::config::AppConfig;
@@ -174,143 +173,102 @@ pub struct UploadArtifacts {
     pub chunk_hashes: Vec<MerkleHash>,
 }
 
-/// Replicate the server's `process_file_upload` logic to build CAS artifacts
-/// that can be uploaded via the protocol endpoints.
+/// Replicate the client-side upload pipeline (chunk → pack xorbs → build
+/// shard) with the same xet-core-structures APIs real clients use, producing
+/// CAS artifacts that can be uploaded via the protocol endpoints.
 pub fn build_upload_artifacts(file_data: &[u8]) -> UploadArtifacts {
-    let chunk_infos = chunk_data(file_data);
+    let chunks: Vec<Chunk> = Chunker::default().next_block(file_data, true);
+    let chunk_hashes: Vec<MerkleHash> = chunks.iter().map(|c| c.hash).collect();
 
-    let chunk_slices: Vec<&[u8]> = chunk_infos
+    let chunk_hashes_and_sizes: Vec<(MerkleHash, u64)> = chunks
         .iter()
-        .map(|ci| &file_data[ci.offset..ci.offset + ci.length])
+        .map(|c| (c.hash, c.data.len() as u64))
         .collect();
 
-    let chunk_hashes: Vec<MerkleHash> = chunk_slices
-        .iter()
-        .map(|data| compute_chunk_hash(data))
-        .collect();
+    let file_hash_hex = file_hash(&chunk_hashes_and_sizes).hex();
 
-    let chunk_hashes_and_sizes: Vec<(MerkleHash, usize)> = chunk_hashes
-        .iter()
-        .zip(chunk_slices.iter())
-        .map(|(h, d)| (*h, d.len()))
-        .collect();
-
-    let file_hash = compute_file_hash(&chunk_hashes_and_sizes);
-    let file_hash_hex = file_hash.to_hex();
-
-    // Split chunks into xorb groups
-    struct XorbGroup {
-        global_start: usize,
-        global_end: usize,
-        xorb_bytes: Vec<u8>,
-    }
-
-    let mut xorb_groups: Vec<XorbGroup> = Vec::new();
-    let mut current_buffer: Vec<u8> = Vec::new();
-    let mut group_start: usize = 0;
-
-    for (i, chunk_slice) in chunk_slices.iter().enumerate() {
-        let serialized = serialize_single_chunk(chunk_slice, CompressionType::Lz4).unwrap();
-
-        if !current_buffer.is_empty() && current_buffer.len() + serialized.len() > XORB_SOFT_LIMIT {
-            xorb_groups.push(XorbGroup {
-                global_start: group_start,
-                global_end: i,
-                xorb_bytes: std::mem::take(&mut current_buffer),
-            });
+    // Split chunks into xorb groups at xet-core's raw-byte / chunk-count cuts
+    let mut groups: Vec<(usize, usize)> = Vec::new(); // [start, end) chunk indices
+    let mut group_start = 0usize;
+    let mut group_bytes = 0usize;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let len = chunk.data.len();
+        if i > group_start
+            && (group_bytes + len > *MAX_XORB_BYTES || i - group_start >= *MAX_XORB_CHUNKS)
+        {
+            groups.push((group_start, i));
             group_start = i;
+            group_bytes = 0;
         }
-
-        current_buffer.extend_from_slice(&serialized);
+        group_bytes += len;
+    }
+    if group_start < chunks.len() {
+        groups.push((group_start, chunks.len()));
     }
 
-    if !current_buffer.is_empty() {
-        xorb_groups.push(XorbGroup {
-            global_start: group_start,
-            global_end: chunk_slices.len(),
-            xorb_bytes: std::mem::take(&mut current_buffer),
-        });
-    }
-
-    // Build shard metadata
+    // Build xorbs + shard metadata
     let mut file_data_entries = Vec::new();
-    let mut cas_info_blocks = Vec::new();
     let mut verification_entries = Vec::new();
+    let mut xorb_infos: Vec<MDBXorbInfo> = Vec::new();
     let mut xorb_entries = Vec::new();
 
-    for group in &xorb_groups {
-        let local_count = group.global_end - group.global_start;
-        let group_hashes_and_sizes = &chunk_hashes_and_sizes[group.global_start..group.global_end];
+    for &(start, end) in &groups {
+        let group_chunks = &chunks[start..end];
+        let raw = RawXorbData::from_chunks(group_chunks, vec![0]);
+        let xorb_hash = raw.hash();
+        let mut xorb_info = raw.xorb_info.clone();
 
-        let xorb_hash = compute_xorb_hash(group_hashes_and_sizes);
-        let xorb_hash_hex = xorb_hash.to_hex();
+        let serialized =
+            SerializedXorbObject::from_xorb_with_compression(raw, CompressionScheme::LZ4, true)
+                .unwrap();
+        xorb_info.metadata.num_bytes_on_disk = serialized.serialized_data.len() as u32;
 
-        xorb_entries.push((xorb_hash_hex.clone(), Bytes::from(group.xorb_bytes.clone())));
+        xorb_entries.push((xorb_hash.hex(), Bytes::from(serialized.serialized_data)));
 
-        let group_unpacked: u32 = (group.global_start..group.global_end)
-            .map(|i| chunk_slices[i].len() as u32)
-            .sum();
+        let group_unpacked: u32 = group_chunks.iter().map(|c| c.data.len() as u32).sum();
 
-        file_data_entries.push(FileDataSequenceEntry {
-            cas_hash: xorb_hash,
-            cas_flags: 0,
-            unpacked_segment_bytes: group_unpacked,
-            chunk_index_start: 0,
-            chunk_index_end: local_count as u32,
-        });
-
-        let group_chunk_hashes: Vec<MerkleHash> = (group.global_start..group.global_end)
-            .map(|i| chunk_hashes[i])
-            .collect();
-        verification_entries.push(FileVerificationEntry {
-            range_hash: compute_verification_hash(&group_chunk_hashes),
-        });
-
-        let mut byte_offset = 0u32;
-        let cas_entries: Vec<CASChunkSequenceEntry> = (group.global_start..group.global_end)
-            .map(|i| {
-                let size = chunk_slices[i].len() as u32;
-                let entry = CASChunkSequenceEntry {
-                    chunk_hash: chunk_hashes[i],
-                    chunk_byte_range_start: byte_offset,
-                    unpacked_segment_bytes: size,
-                };
-                byte_offset += size;
-                entry
-            })
-            .collect();
-
-        cas_info_blocks.push(CASInfoBlock {
-            header: CASChunkSequenceHeader {
-                cas_hash: xorb_hash,
-                cas_flags: 0,
-                num_entries: local_count as u32,
-                num_bytes_in_cas: group_unpacked,
-                num_bytes_on_disk: group.xorb_bytes.len() as u32,
-            },
-            entries: cas_entries,
-        });
+        file_data_entries.push(FileDataSequenceEntry::new(
+            xorb_hash,
+            group_unpacked,
+            0u32,
+            (end - start) as u32,
+        ));
+        verification_entries.push(FileVerificationEntry::new(range_hash_from_chunks(
+            &chunk_hashes[start..end],
+        )));
+        xorb_infos.push(xorb_info);
     }
 
-    let file_info_block = FileInfoBlock {
-        header: FileDataSequenceHeader {
-            file_hash,
-            file_flags: MDB_FILE_FLAG_WITH_VERIFICATION,
-            num_entries: file_data_entries.len() as u32,
-        },
-        entries: file_data_entries,
-        verification_entries,
+    let file_info = MDBFileInfo {
+        metadata: FileDataSequenceHeader::new(
+            MerkleHash::from_hex(&file_hash_hex).unwrap(),
+            file_data_entries.len(),
+            true,
+            false,
+        ),
+        segments: file_data_entries,
+        verification: verification_entries,
         metadata_ext: None,
     };
 
-    let shard = Shard {
-        header: ShardHeader::new(0), // upload shards: footer_size = 0
-        file_info_blocks: vec![file_info_block],
-        cas_info_blocks,
-        footer: None,
+    // Upload shard format: header with footer_size=0, file info section,
+    // bookend, xorb info section, bookend.
+    let mut shard_bytes = Vec::new();
+    let header = MDBShardFileHeader {
+        footer_size: 0,
+        ..Default::default()
     };
-
-    let shard_bytes = shard.to_bytes().unwrap();
+    header.serialize(&mut shard_bytes).unwrap();
+    file_info.serialize(&mut shard_bytes).unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .unwrap();
+    for xorb_info in &xorb_infos {
+        xorb_info.serialize(&mut shard_bytes).unwrap();
+    }
+    XorbChunkSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .unwrap();
 
     UploadArtifacts {
         file_hash: file_hash_hex,
@@ -409,9 +367,11 @@ pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<
         assert!(resp.status().is_success(), "xorb range fetch failed");
         let part = resp.bytes().await.unwrap();
 
-        for chunk in deserialize_xorb(&part).unwrap() {
-            file_bytes.extend_from_slice(&chunk.data);
-        }
+        // The ranged fetch returns raw chunk frames (no footer), exactly what
+        // xet-core feeds deserialize_chunks.
+        let (bytes, _boundaries) =
+            deserialize_chunks(&mut std::io::Cursor::new(&part[..])).unwrap();
+        file_bytes.extend_from_slice(&bytes);
     }
 
     file_bytes[recon.offset_into_first_range as usize..].to_vec()

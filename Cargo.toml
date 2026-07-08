@@ -8,11 +8,11 @@ license = "Apache-2.0"
 repository = "https://github.com/ggoggam/openxet"
 
 [workspace.dependencies]
-# Hashing
-blake3 = "1"
-
-# Compression
-lz4_flex = "0.11"
+# HuggingFace xet-core crates. These are published as packaging for hf-xet
+# with no semver promise, so they are pinned exactly; upgrade deliberately
+# alongside hf_xet releases and re-run the compat test suite.
+xet-core-structures = "=1.5.2"
+xet-data = "=1.5.2"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -28,11 +28,5 @@ anyhow = "1"
 # Hex encoding
 hex = "0.4"
 
-# HMAC
-hmac = "0.12"
-sha2 = "0.10"
-
 # Internal crates
-openxet-hashing = { path = "crates/hashing" }
-openxet-chunking = { path = "crates/chunking" }
 openxet-cas-types = { path = "crates/cas_types" }

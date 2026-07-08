@@ -1,23 +1,12 @@
 mod helpers;
 
-use hmac::{Hmac, Mac};
-use openxet_cas_types::shard::Shard;
-use openxet_hashing::MerkleHash;
-use sha2::Sha256;
+use std::io::Cursor;
+
+use xet_core_structures::metadata_shard::MDBShardInfo;
 
 use helpers::{TestServer, build_upload_artifacts, generate_test_data, upload_artifacts};
 
-type HmacSha256 = Hmac<Sha256>;
-
-/// Compute HMAC-SHA256 of a MerkleHash, returning a new MerkleHash.
-fn hmac_hash(key: &[u8; 32], hash: &MerkleHash) -> MerkleHash {
-    let mut mac = HmacSha256::new_from_slice(key).unwrap();
-    mac.update(hash.as_bytes());
-    let result = mac.finalize().into_bytes();
-    MerkleHash::from_bytes(result.into())
-}
-
-/// Dedup endpoint returns an HMAC-protected shard with CAS info.
+/// Dedup endpoint returns an HMAC-keyed shard with CAS info.
 #[tokio::test]
 async fn test_dedup_returns_hmac_shard() {
     let server = TestServer::start().await;
@@ -26,7 +15,7 @@ async fn test_dedup_returns_hmac_shard() {
     upload_artifacts(&server, &artifacts).await;
 
     let token = server.read_token();
-    let chunk_hash = artifacts.chunk_hashes[0].to_hex();
+    let chunk_hash = artifacts.chunk_hashes[0].hex();
 
     let resp = server
         .client
@@ -41,21 +30,22 @@ async fn test_dedup_returns_hmac_shard() {
     assert_eq!(resp.status(), 200);
 
     let body = resp.bytes().await.unwrap();
-    let shard = Shard::from_bytes(&body).unwrap();
+    let mut reader = Cursor::new(&body[..]);
+    let shard_info = MDBShardInfo::load_from_reader(&mut reader).unwrap();
 
-    // Dedup response should have footer with HMAC key
-    assert!(shard.footer.is_some());
-    let footer = shard.footer.as_ref().unwrap();
-    assert_ne!(footer.chunk_hash_hmac_key, [0u8; 32]);
+    // Dedup response footer must carry an HMAC key
+    assert!(shard_info.chunk_hashes_protected());
+    assert!(shard_info.chunk_hmac_key().is_some());
 
-    // Should have no file info blocks (dedup response)
-    assert!(shard.file_info_blocks.is_empty());
-
-    // Should have CAS info blocks
-    assert!(!shard.cas_info_blocks.is_empty());
+    // Should have no file info (dedup response), but xorb blocks present
+    assert_eq!(shard_info.num_file_entries(), 0);
+    let xorb_blocks = shard_info.read_all_xorb_blocks_full(&mut reader).unwrap();
+    assert!(!xorb_blocks.is_empty());
 }
 
-/// Verify HMAC consistency: client can verify chunk identity by HMACing its own hashes.
+/// HMAC consistency, verified the way a real xet-core client consumes the
+/// response: raw (unkeyed) chunk hashes fed to chunk_hash_dedup_query must
+/// match the keyed entries, and manual keyed-hash lookup must agree.
 #[tokio::test]
 async fn test_dedup_hmac_verification() {
     let server = TestServer::start().await;
@@ -64,7 +54,7 @@ async fn test_dedup_hmac_verification() {
     upload_artifacts(&server, &artifacts).await;
 
     let token = server.read_token();
-    let chunk_hash = artifacts.chunk_hashes[0].to_hex();
+    let chunk_hash = artifacts.chunk_hashes[0].hex();
 
     let resp = server
         .client
@@ -79,22 +69,26 @@ async fn test_dedup_hmac_verification() {
     assert_eq!(resp.status(), 200);
 
     let body = resp.bytes().await.unwrap();
-    let shard = Shard::from_bytes(&body).unwrap();
-    let footer = shard.footer.as_ref().unwrap();
-    let hmac_key = &footer.chunk_hash_hmac_key;
+    let mut reader = Cursor::new(&body[..]);
+    let shard_info = MDBShardInfo::load_from_reader(&mut reader).unwrap();
 
-    // HMAC our known chunk hash and verify it appears in the response
-    let hmac_of_known = hmac_hash(hmac_key, &artifacts.chunk_hashes[0]);
+    // The client-side query path: raw hashes in, keyed matching internally.
+    let (matched, entry) = shard_info
+        .chunk_hash_dedup_query(&mut reader, &artifacts.chunk_hashes)
+        .unwrap()
+        .expect("uploaded chunks must dedup against the response shard");
+    assert!(matched >= 1);
+    assert_eq!(entry.xorb_hash.hex(), artifacts.xorb_entries[0].0);
 
-    let mut found = false;
-    for cas_block in &shard.cas_info_blocks {
-        for entry in &cas_block.entries {
-            if entry.chunk_hash == hmac_of_known {
-                found = true;
-                break;
-            }
-        }
-    }
+    // Manual check: HMAC our known chunk hash and find it among the entries.
+    let key = shard_info.chunk_hmac_key().unwrap();
+    let keyed_known = artifacts.chunk_hashes[0].hmac(key);
+
+    let xorb_blocks = shard_info.read_all_xorb_blocks_full(&mut reader).unwrap();
+    let found = xorb_blocks
+        .iter()
+        .flat_map(|b| &b.chunks)
+        .any(|e| e.chunk_hash == keyed_known);
     assert!(
         found,
         "HMAC of known chunk hash not found in dedup response"

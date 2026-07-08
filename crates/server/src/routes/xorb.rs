@@ -5,39 +5,26 @@ use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde::Serialize;
 
-use openxet_cas_types::chunk::ChunkHeader;
-use openxet_cas_types::xorb::{MAX_XORB_SIZE, compute_xorb_hash, deserialize_xorb};
-use openxet_hashing::{MerkleHash, compute_chunk_hash};
+use xet_core_structures::merklehash::MerkleHash;
+use xet_core_structures::xorb_object::constants::MAX_XORB_BYTES;
 
 use crate::auth::RequireWrite;
 use crate::error::AppError;
+use crate::routes::xorb_meta::{layout_from_info, validated_xorb_info};
 use crate::state::AppState;
-use crate::storage::index::{ChunkLocation, XorbChunk, XorbLayout};
+use crate::storage::index::ChunkLocation;
 use crate::storage::{ChunkIndex, StorageBackend, validate_hash};
+
+/// Serialized uploads may exceed the raw 64 MiB xorb content cap slightly:
+/// per-chunk headers and the trailing metadata footer add overhead on top of
+/// the (compressed) chunk payloads.
+pub(crate) fn max_serialized_xorb_size() -> usize {
+    *MAX_XORB_BYTES + 4 * 1024 * 1024
+}
 
 #[derive(Debug, Serialize)]
 pub struct XorbUploadResponse {
     pub was_inserted: bool,
-}
-
-/// Compressed data size (excluding the 8-byte header) of each chunk, in xorb
-/// order. Parses only chunk headers — no decompression. `body` is already
-/// validated by [`deserialize_xorb`] before this is called, so the walk mirrors
-/// that framing and never runs past the end.
-fn chunk_compressed_sizes(xorb_data: &[u8]) -> Vec<u32> {
-    let mut sizes = Vec::new();
-    let mut pos = 0usize;
-
-    while pos + ChunkHeader::SIZE <= xorb_data.len() {
-        let header_bytes: [u8; 8] = xorb_data[pos..pos + 8].try_into().unwrap();
-        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-            break;
-        };
-        sizes.push(header.compressed_size);
-        pos += ChunkHeader::SIZE + header.compressed_size as usize;
-    }
-
-    sizes
 }
 
 pub async fn post_xorb(
@@ -48,7 +35,7 @@ pub async fn post_xorb(
 ) -> Result<Json<XorbUploadResponse>, AppError> {
     validate_hash(&hash)?;
 
-    if body.len() > MAX_XORB_SIZE {
+    if body.len() > max_serialized_xorb_size() {
         return Err(AppError::PayloadTooLarge);
     }
 
@@ -59,46 +46,33 @@ pub async fn post_xorb(
         }));
     }
 
-    // Parse and validate xorb
-    let chunks = deserialize_xorb(&body)?;
+    let expected = MerkleHash::from_hex(&hash)
+        .map_err(|e| AppError::BadRequest(format!("invalid xorb hash: {e}")))?;
 
-    // A xorb must contain at least one chunk; an empty chunk list would panic
-    // the merkle-root computation below.
-    if chunks.is_empty() {
+    // Recomputes every chunk hash from the (decompressed) data and checks the
+    // aggregate against the URL hash — the core CAS invariant.
+    let info = validated_xorb_info(&body, &expected)?;
+
+    if info.num_chunks == 0 {
         return Err(AppError::BadRequest("xorb contains no chunks".to_string()));
     }
 
-    // Compute chunk hashes and verify xorb hash
-    let chunk_hashes_and_sizes: Vec<(MerkleHash, usize)> = chunks
-        .iter()
-        .map(|c| (compute_chunk_hash(&c.data), c.data.len()))
-        .collect();
-
-    let computed_hash = compute_xorb_hash(&chunk_hashes_and_sizes);
-    if computed_hash.to_hex() != hash {
-        return Err(AppError::BadRequest(format!(
-            "xorb hash mismatch: URL={hash}, computed={}",
-            computed_hash.to_hex()
-        )));
-    }
-
-    // On-disk size and per-chunk compressed sizes must be read before `body` is
-    // moved into storage. Compressed sizes come from a header-only walk (no
-    // decompression) and feed the layout so reconstruction can compute byte
-    // ranges without re-downloading the xorb.
-    let num_bytes_on_disk = body.len() as u32;
-    let compressed_sizes = chunk_compressed_sizes(&body);
+    // Record the layout before `body` moves into storage, so dedup and
+    // reconstruction responses can be built from the index instead of
+    // re-reading and re-parsing the xorb.
+    let layout = layout_from_info(&info, body.len() as u32);
 
     // Store the xorb
     state.storage.put_xorb(&hash, body).await?;
 
     // Index all chunks in one batched write.
-    let entries: Vec<(String, ChunkLocation)> = chunk_hashes_and_sizes
+    let entries: Vec<(String, ChunkLocation)> = info
+        .chunk_hashes
         .iter()
         .enumerate()
-        .map(|(i, (chunk_hash, _))| {
+        .map(|(i, chunk_hash)| {
             (
-                chunk_hash.to_hex(),
+                chunk_hash.hex(),
                 ChunkLocation {
                     xorb_hash: hash.clone(),
                     chunk_index: i as u32,
@@ -108,20 +82,6 @@ pub async fn post_xorb(
         .collect();
     state.chunk_index.put_batch(entries).await?;
 
-    // Record the xorb layout so dedup responses can be built from the index
-    // instead of re-downloading and decompressing the xorb from storage.
-    let layout = XorbLayout {
-        num_bytes_on_disk,
-        chunks: chunk_hashes_and_sizes
-            .iter()
-            .zip(&compressed_sizes)
-            .map(|((chunk_hash, size), compressed_size)| XorbChunk {
-                chunk_hash: chunk_hash.to_hex(),
-                unpacked_size: *size as u32,
-                compressed_size: *compressed_size,
-            })
-            .collect(),
-    };
     state.chunk_index.put_xorb_layout(&hash, layout).await?;
 
     Ok(Json(XorbUploadResponse { was_inserted: true }))
