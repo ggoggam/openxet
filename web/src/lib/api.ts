@@ -1,7 +1,9 @@
-// Xet wire-protocol client (/v1/*). The server exposes nothing else:
-// uploads are chunked/hashed/packed in the browser (openxet-wasm) and POSTed
-// as xorbs + a shard; downloads fetch the reconstruction plan and reassemble
-// the file client-side from xorb byte ranges (chunk decoding via openxet-wasm).
+// Xet wire-protocol client (/v1/*) plus the server's management/lifecycle
+// endpoints. Uploads are chunked/hashed/packed in the browser (openxet-wasm)
+// and POSTed as xorbs + a shard; downloads fetch the reconstruction plan and
+// reassemble the file client-side from xorb byte ranges (chunk decoding via
+// openxet-wasm). The management endpoints (file/xorb listings, accounting, GC)
+// are plain JSON over the same bearer-token auth.
 
 import { authHeaders } from "./auth";
 
@@ -75,6 +77,12 @@ async function authFetch(path: string, init?: RequestInit): Promise<Response> {
     throw new Error(body.error || `HTTP ${res.status}`);
   }
   return res;
+}
+
+/** GET a JSON endpoint with bearer auth. */
+async function authJson<T>(path: string): Promise<T> {
+  const res = await authFetch(path);
+  return res.json() as Promise<T>;
 }
 
 // ─── Read paths ──────────────────────────────────────────────────────────────
@@ -274,4 +282,140 @@ export async function uploadFile(
   } finally {
     plan.free();
   }
+}
+
+// ─── Management / lifecycle (JSON) ──────────────────────────────────────────
+
+/** One page of a cursor-paginated listing. `next_cursor` is absent on the
+ * last page; pass it back as the `cursor` param to fetch the next page. */
+export interface Page<T> {
+  items: T[];
+  next_cursor?: string;
+}
+
+export interface FileListItem {
+  file_hash: string;
+  shard_hash: string;
+  /** Logical (pre-dedup) size, or 0 for a file with no ownership claim. */
+  logical_bytes: number;
+}
+
+export interface OwnerClaim {
+  owner: string;
+  logical_bytes: number;
+  created_at_unix: number;
+}
+
+export interface FileManagementDetail {
+  file_hash: string;
+  shard_hash: string;
+  logical_bytes: number;
+  owners: OwnerClaim[];
+  /** Distinct xorbs this file's reconstruction terms reference. */
+  xorbs: string[];
+}
+
+export interface XorbListItem {
+  xorb_hash: string;
+  /** Stored (compressed) size on disk. */
+  num_bytes_on_disk: number;
+  chunk_count: number;
+}
+
+export interface DeleteFileResult {
+  /** Whether the file's index entry was removed (its last claim released). */
+  deleted: boolean;
+  /** Ownership claims still outstanding after this call. */
+  remaining_owners: number;
+}
+
+export interface OwnerUsage {
+  owner: string;
+  file_count: number;
+  logical_bytes: number;
+}
+
+export interface Accounting {
+  owners: OwnerUsage[];
+  files: number;
+  claimed_files: number;
+  /** Logical bytes counting each distinct file once. */
+  unique_file_bytes: number;
+  xorb_count: number;
+  /** Stored (compressed, post-dedup) xorb bytes. */
+  physical_xorb_bytes: number;
+  shard_count: number;
+  physical_shard_bytes: number;
+  /** unique_file_bytes / physical_xorb_bytes. */
+  dedup_ratio: number;
+}
+
+export interface GcReport {
+  live_files: number;
+  live_shards: number;
+  live_xorbs: number;
+  deleted_xorbs: number;
+  freed_xorb_bytes: number;
+  deleted_shards: number;
+  freed_shard_bytes: number;
+  /** Unreferenced objects left alone because they are within the grace period. */
+  skipped_in_grace: number;
+}
+
+function pageQuery(params: {
+  cursor?: string;
+  limit?: number;
+  owner?: string;
+}): string {
+  const q = new URLSearchParams();
+  if (params.cursor) q.set("cursor", params.cursor);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  if (params.owner) q.set("owner", params.owner);
+  const s = q.toString();
+  return s ? `?${s}` : "";
+}
+
+/** List files (cursor-paginated), optionally filtered to one owner's files. */
+export function listFiles(params: {
+  cursor?: string;
+  limit?: number;
+  owner?: string;
+}): Promise<Page<FileListItem>> {
+  return authJson(`/v1/files${pageQuery(params)}`);
+}
+
+/** Full server-side detail for one file: shard, size, owners, referenced xorbs. */
+export function fetchFileManagementDetail(
+  hash: string,
+): Promise<FileManagementDetail> {
+  return authJson(`/v1/files/${hash}`);
+}
+
+/** List indexed xorbs (cursor-paginated) with stored size and chunk count. */
+export function listXorbs(params: {
+  cursor?: string;
+  limit?: number;
+}): Promise<Page<XorbListItem>> {
+  return authJson(`/v1/xorbs${pageQuery(params)}`);
+}
+
+/** Release the current caller's ownership claim on a file. The file is removed
+ * (and its exclusive storage becomes collectable) once its last claim goes. */
+export async function deleteFile(hash: string): Promise<DeleteFileResult> {
+  const res = await authFetch(`/v1/files/${hash}`, { method: "DELETE" });
+  return res.json();
+}
+
+/** Per-owner logical usage plus global physical storage stats. */
+export function fetchAccounting(): Promise<Accounting> {
+  return authJson(`/v1/accounting`);
+}
+
+/** Run one mark-and-sweep GC pass. `graceSeconds` overrides the server default
+ * for this pass (0 collects everything unreferenced regardless of age). */
+export async function runGc(graceSeconds?: number): Promise<GcReport> {
+  const q =
+    graceSeconds != null ? `?grace_seconds=${graceSeconds}` : "";
+  const res = await authFetch(`/v1/gc${q}`, { method: "POST" });
+  return res.json();
 }

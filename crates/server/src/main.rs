@@ -81,6 +81,25 @@ async fn main() -> Result<()> {
         fetch_token_secret,
     };
 
+    if let Some(interval_seconds) = config.gc.interval_seconds {
+        let gc_state = state.clone();
+        let grace = Duration::from_secs(config.gc.grace_seconds);
+        let interval = Duration::from_secs(interval_seconds.max(1));
+        tracing::info!(
+            interval_seconds,
+            grace_seconds = config.gc.grace_seconds,
+            "background GC enabled"
+        );
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(interval).await;
+                if let Err(e) = openxet_server::gc::run_gc(&gc_state, grace).await {
+                    tracing::error!(error = %e, "background gc pass failed");
+                }
+            }
+        });
+    }
+
     let app = build_router(state);
 
     let addr = format!("{}:{}", config.server.host, config.server.port);

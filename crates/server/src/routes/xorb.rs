@@ -1,19 +1,49 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::HeaderMap;
 use axum::response::IntoResponse;
 use bytes::Bytes;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use xet_core_structures::merklehash::MerkleHash;
 use xet_core_structures::xorb_object::constants::MAX_XORB_BYTES;
 
-use crate::auth::RequireWrite;
+use crate::auth::{RequireRead, RequireWrite};
 use crate::error::AppError;
+use crate::pagination::{Page, clamp_limit, cursor_after};
 use crate::routes::xorb_meta::{layout_from_info, validated_xorb_info};
 use crate::state::AppState;
 use crate::storage::index::ChunkLocation;
-use crate::storage::{ChunkIndex, StorageBackend, validate_hash};
+use crate::storage::{ChunkIndex, StorageBackend, XorbSummary, validate_hash};
+
+#[derive(Debug, Deserialize)]
+pub struct ListXorbsParams {
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /v1/xorbs — cursor-paginated listing of indexed xorbs (those with a
+/// recorded layout, i.e. every xorb that participates in dedup), ordered by
+/// xorb hash. Unlike an object-store scan this is an ordered index range, so
+/// pages are stable and each costs only its own rows.
+pub async fn list_xorbs(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+    Query(params): Query<ListXorbsParams>,
+) -> Result<Json<Page<XorbSummary>>, AppError> {
+    let limit = clamp_limit(params.limit);
+    let cursor = params.cursor.as_deref().filter(|s| !s.is_empty());
+    let after = cursor_after(cursor)?;
+
+    let rows = state
+        .chunk_index
+        .list_xorb_summaries(after.as_deref(), limit + 1)
+        .await?;
+
+    Ok(Json(Page::from_overfetched(rows, limit, |x| {
+        x.xorb_hash.clone()
+    })))
+}
 
 /// Serialized uploads may exceed the raw 64 MiB xorb content cap slightly:
 /// per-chunk headers and the trailing metadata footer add overhead on top of

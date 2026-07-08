@@ -23,6 +23,23 @@ pub struct Claims {
     pub scope: Scope,
     pub repo: String,
     pub exp: usize,
+    /// Stable subject identity of the caller (JWT `sub`). Used as the
+    /// accounting owner for uploads and deletions. Defaults to empty for
+    /// tokens minted before this claim existed.
+    #[serde(default)]
+    pub sub: String,
+}
+
+impl Claims {
+    /// The accounting owner for this caller: the token's `sub`, or `"default"`
+    /// when the token carries no subject (or auth is disabled).
+    pub fn owner(&self) -> &str {
+        if self.sub.is_empty() {
+            "default"
+        } else {
+            &self.sub
+        }
+    }
 }
 
 /// Create a signed JWT from the given claims.

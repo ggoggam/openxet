@@ -29,6 +29,7 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub storage: StorageConfig,
     pub auth: AuthConfig,
+    pub gc: GcConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -102,6 +103,29 @@ pub struct AuthConfig {
 
     /// How long a fetched JWKS is trusted before it is refetched, in seconds.
     pub jwks_ttl_seconds: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GcConfig {
+    /// Unreferenced objects younger than this are never collected. Must
+    /// comfortably exceed the longest plausible upload session: clients
+    /// upload xorbs first and only then register them via a shard, so a
+    /// young unreferenced xorb is usually an upload in flight.
+    pub grace_seconds: u64,
+
+    /// When set, run a GC pass automatically every this many seconds. Unset
+    /// (the default) means GC only runs when POST /v1/gc is called.
+    pub interval_seconds: Option<u64>,
+}
+
+impl Default for GcConfig {
+    fn default() -> Self {
+        Self {
+            grace_seconds: 24 * 60 * 60,
+            interval_seconds: None,
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -267,6 +291,16 @@ impl AppConfig {
             && let Ok(ttl) = ttl.parse::<u64>()
         {
             self.auth.jwks_ttl_seconds = ttl;
+        }
+        if let Ok(v) = std::env::var("OPENXET_GC_GRACE_SECONDS")
+            && let Ok(v) = v.parse::<u64>()
+        {
+            self.gc.grace_seconds = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_GC_INTERVAL_SECONDS")
+            && let Ok(v) = v.parse::<u64>()
+        {
+            self.gc.interval_seconds = Some(v);
         }
     }
 

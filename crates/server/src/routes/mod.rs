@@ -1,4 +1,6 @@
+mod admin;
 mod dedup;
+mod files;
 mod reconstruction;
 mod shard;
 mod xorb;
@@ -37,6 +39,7 @@ fn redact_query(query: &str) -> String {
 
 pub fn build_router(state: AppState) -> Router {
     let cas_routes = Router::new()
+        .route("/v1/xorbs", get(xorb::list_xorbs))
         .route(
             "/v1/xorbs/default/{hash}",
             get(xorb::get_xorb).post(xorb::post_xorb),
@@ -48,7 +51,16 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/reconstructions/{file_id}",
             get(reconstruction::get_reconstruction),
         )
-        .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup));
+        .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup))
+        // Management/lifecycle endpoints (not part of the Xet wire protocol):
+        // list and inspect files, release a file, collect garbage, inspect usage.
+        .route("/v1/files", get(files::list_files))
+        .route(
+            "/v1/files/{file_id}",
+            get(files::get_file).delete(files::delete_file),
+        )
+        .route("/v1/gc", post(admin::post_gc))
+        .route("/v1/accounting", get(admin::get_accounting));
 
     let frontend_dir = &state.config.server.frontend_dir;
     let spa_fallback = ServeDir::new(frontend_dir)

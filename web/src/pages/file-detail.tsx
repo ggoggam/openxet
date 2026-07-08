@@ -1,7 +1,11 @@
 import React, { useMemo, useEffect, Suspense } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { useParams, Link } from "@tanstack/react-router";
-import { ArrowLeft, Download } from "lucide-react";
+import {
+  useMutation,
+  useQuery,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useParams, Link, useNavigate } from "@tanstack/react-router";
+import { ArrowLeft, Download, Loader2, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -22,10 +26,12 @@ import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fetchFileDetail,
+  fetchFileManagementDetail,
   fetchFileContent,
   fetchFileContentRange,
+  deleteFile,
 } from "@/lib/api";
-import { formatBytes, truncateHash } from "@/lib/format";
+import { formatBytes, formatUnixTime, truncateHash } from "@/lib/format";
 
 /** Max bytes we try to render as text in the preview. */
 const TEXT_PREVIEW_LIMIT = 512 * 1024; // 512 KiB
@@ -504,12 +510,91 @@ function FileContentPreview({
   );
 }
 
+/** Server-side ownership claims for a file (owners, sizes, claim times). */
+function OwnershipCard({ hash }: { hash: string }) {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["file-management", hash],
+    queryFn: () => fetchFileManagementDetail(hash),
+  });
+
+  return (
+    <Card>
+      <CardHeader className="pb-2">
+        <CardTitle className="text-lg">Ownership</CardTitle>
+        <CardDescription>
+          Who has claimed this file. It is removed once the last claim is
+          released; each claimant is charged its full logical size.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {isLoading ? (
+          <Skeleton className="h-16 w-full" />
+        ) : error ? (
+          <p className="text-sm text-muted-foreground">
+            Ownership unavailable: {error.message}
+          </p>
+        ) : data && data.owners.length > 0 ? (
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Owner</TableHead>
+                <TableHead>Claimed</TableHead>
+                <TableHead className="text-right">Logical Size</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.owners.map((o) => (
+                <TableRow key={o.owner}>
+                  <TableCell className="font-medium">{o.owner}</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    {formatUnixTime(o.created_at_unix)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    {formatBytes(o.logical_bytes)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        ) : (
+          <p className="text-sm text-muted-foreground">
+            No ownership claims (this file predates accounting).
+          </p>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
 export function FileDetailPage() {
   const { hash } = useParams({ from: "/files/$hash" });
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
   const { data, isLoading, error } = useQuery({
     queryKey: ["file", hash],
     queryFn: () => fetchFileDetail(hash),
   });
+
+  const remove = useMutation({
+    mutationFn: () => deleteFile(hash),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["files"] });
+      navigate({ to: "/files" });
+    },
+  });
+
+  const handleRemove = () => {
+    if (
+      window.confirm(
+        "Release your ownership claim on this file?\n\n" +
+          "It stays available while other owners still claim it, and is removed " +
+          "once the last claim is released. Storage is reclaimed by the next " +
+          "garbage-collection pass.",
+      )
+    ) {
+      remove.mutate();
+    }
+  };
 
   if (error) {
     return (
@@ -534,7 +619,28 @@ export function FileDetailPage() {
             {isLoading ? <Skeleton className="h-4 w-96 inline-block" /> : hash}
           </p>
         </div>
+        <Button
+          variant="outline"
+          size="sm"
+          className="ml-auto"
+          onClick={handleRemove}
+          disabled={remove.isPending}
+          title="Release your ownership claim on this file"
+        >
+          {remove.isPending ? (
+            <Loader2 className="size-4 animate-spin" />
+          ) : (
+            <Trash2 className="size-4" />
+          )}
+          Delete
+        </Button>
       </div>
+
+      {remove.isError && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive">
+          Delete failed: {remove.error.message}
+        </div>
+      )}
 
       {isLoading ? (
         <div className="space-y-4">
@@ -575,6 +681,8 @@ export function FileDetailPage() {
               </CardContent>
             </Card>
           </div>
+
+          <OwnershipCard hash={hash} />
 
           <FileContentPreview hash={hash} totalSize={data.total_size} />
 

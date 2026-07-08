@@ -93,6 +93,7 @@ impl TestServer {
                 shard_key_ttl_seconds: 3600,
                 ..Default::default()
             },
+            gc: Default::default(),
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
@@ -140,15 +141,24 @@ impl TestServer {
             scope: Scope::Read,
             repo: "test".to_string(),
             exp: (chrono_exp()),
+            sub: "test-user".to_string(),
         };
         create_token(TEST_SECRET, &claims).unwrap()
     }
 
     pub fn write_token(&self) -> String {
+        self.write_token_for("test-user")
+    }
+
+    /// Mint a write token for a specific subject, for exercising per-owner
+    /// accounting and deletion.
+    #[allow(dead_code)]
+    pub fn write_token_for(&self, sub: &str) -> String {
         let claims = Claims {
             scope: Scope::Write,
             repo: "test".to_string(),
             exp: (chrono_exp()),
+            sub: sub.to_string(),
         };
         create_token(TEST_SECRET, &claims).unwrap()
     }
@@ -298,13 +308,23 @@ pub fn generate_test_data(size: usize) -> Vec<u8> {
 /// Upload all xorbs and the shard via the CAS protocol endpoints.
 pub async fn upload_artifacts(server: &TestServer, artifacts: &UploadArtifacts) {
     let token = server.write_token();
+    upload_artifacts_with_token(server, artifacts, &token).await;
+}
 
+/// Like [`upload_artifacts`] but with a caller-supplied bearer token, so tests
+/// can upload as different owners.
+#[allow(dead_code)]
+pub async fn upload_artifacts_with_token(
+    server: &TestServer,
+    artifacts: &UploadArtifacts,
+    token: &str,
+) {
     // Upload xorbs
     for (hash, data) in &artifacts.xorb_entries {
         let resp = server
             .client
             .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
-            .bearer_auth(&token)
+            .bearer_auth(token)
             .body(data.clone())
             .send()
             .await
@@ -316,7 +336,7 @@ pub async fn upload_artifacts(server: &TestServer, artifacts: &UploadArtifacts) 
     let resp = server
         .client
         .post(format!("{}/v1/shards", server.base_url))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .body(artifacts.shard_bytes.clone())
         .send()
         .await
@@ -336,7 +356,7 @@ pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<
             "{}/v1/reconstructions/{file_hash}",
             server.base_url
         ))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .send()
         .await
         .unwrap();
