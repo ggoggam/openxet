@@ -21,15 +21,30 @@ services:
       AWS_ACCESS_KEY_ID: rustfsadmin
       AWS_SECRET_ACCESS_KEY: rustfsadmin
       AWS_DEFAULT_REGION: us-east-1
-    entrypoint: >
-      /bin/sh -c "
-      until aws --endpoint-url http://rustfs:9000 s3 ls >/dev/null 2>&1; do
-        echo 'waiting for rustfs...'; sleep 2;
-      done;
-      aws --endpoint-url http://rustfs:9000 s3 mb s3://openxet || true;
-      echo 'bucket ready';
-      exit 0;
-      "
+    # The web UI fetches presigned xorb URLs straight from RustFS on a
+    # different origin, with a Range header (which triggers a CORS preflight),
+    # so the bucket needs a CORS policy. Origins are open ("*") because
+    # presigned URLs are self-authenticating; restrict AllowedOrigins to the
+    # UI's origin for production. ExposeHeaders covers what the download path
+    # reads from the response.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        until aws --endpoint-url http://rustfs:9000 s3 ls >/dev/null 2>&1; do
+          echo 'waiting for rustfs...'; sleep 2;
+        done
+        aws --endpoint-url http://rustfs:9000 s3 mb s3://openxet || true
+        aws --endpoint-url http://rustfs:9000 s3api put-bucket-cors --bucket openxet --cors-configuration '{
+          "CORSRules": [{
+            "AllowedOrigins": ["*"],
+            "AllowedMethods": ["GET", "HEAD"],
+            "AllowedHeaders": ["*"],
+            "ExposeHeaders": ["Content-Range", "Content-Length", "ETag"],
+            "MaxAgeSeconds": 3600
+          }]
+        }'
+        echo 'bucket ready (CORS configured)'
 
   postgres:
     image: postgres:17-alpine

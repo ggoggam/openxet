@@ -1,19 +1,27 @@
+use std::collections::HashMap;
+use std::io::Cursor;
+use std::sync::Arc;
+
 use axum::Json;
 use axum::extract::State;
 use bytes::Bytes;
 use serde::Serialize;
 
-use openxet_cas_types::shard::{MAX_SHARD_SIZE, Shard};
-use openxet_cas_types::xorb::deserialize_xorb_range;
-use openxet_hashing::{
-    MerkleHash, compute_chunk_hash, compute_file_hash, compute_verification_hash,
-};
+use xet_core_structures::merklehash::{MerkleHash, compute_data_hash, file_hash};
+use xet_core_structures::metadata_shard::MDBShardFileHeader;
+use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
+use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
+use xet_core_structures::xorb_object::XorbObjectInfoV1;
 
 use crate::auth::RequireWrite;
 use crate::error::AppError;
+use crate::routes::xorb_meta::xorb_info_from_stored;
 use crate::state::AppState;
 use crate::storage::index::ChunkLocation;
 use crate::storage::{ChunkIndex, FileIndex, StorageBackend, validate_hash};
+
+/// Maximum shard size: 64 MiB.
+pub(crate) const MAX_SHARD_SIZE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize)]
 pub struct ShardUploadResponse {
@@ -29,23 +37,32 @@ pub async fn post_shard(
         return Err(AppError::PayloadTooLarge);
     }
 
-    // Parse the shard
-    let shard = Shard::from_bytes(&body)?;
-
-    // Uploaded shards MUST NOT have a footer
-    if shard.header.footer_size != 0 {
+    // Uploaded shards MUST NOT have a footer (xet-core strips it before
+    // uploading; the footer is only present in shards the server hands out).
+    let header = MDBShardFileHeader::deserialize(&mut Cursor::new(&body[..]))
+        .map_err(|e| AppError::BadRequest(format!("invalid shard: {e}")))?;
+    if header.footer_size != 0 {
         return Err(AppError::BadRequest(
             "upload shards must have footer_size=0".to_string(),
         ));
     }
+
+    let shard = MDBMinimalShard::from_reader(&mut Cursor::new(&body[..]), true, true)
+        .map_err(|e| AppError::BadRequest(format!("invalid shard: {e}")))?;
 
     // Validate every file block: referenced xorbs must exist, verification
     // hashes (when present) must match, and — critically — the declared
     // file_hash must equal the hash recomputed from the actual chunk content.
     // Without that last check a writer could register arbitrary bytes under any
     // file hash and poison later reconstructions (the core CAS invariant).
-    for file_block in &shard.file_info_blocks {
-        if file_block.entries.is_empty() {
+    // Chunk hashes come from the stored xorbs' metadata footers, which were
+    // themselves verified against the chunk data at xorb upload time.
+    let mut xorb_meta_cache: HashMap<String, Arc<XorbObjectInfoV1>> = HashMap::new();
+
+    for file_idx in 0..shard.num_files() {
+        let file_view = shard.file(file_idx).expect("index in range");
+        let num_entries = file_view.num_entries();
+        if num_entries == 0 {
             return Err(AppError::BadRequest(
                 "file info block has no entries".to_string(),
             ));
@@ -53,102 +70,107 @@ pub async fn post_shard(
 
         // (chunk_hash, size) for the whole file, in term order, to rebuild the
         // file hash.
-        let mut file_chunks: Vec<(MerkleHash, usize)> = Vec::new();
+        let mut file_chunks: Vec<(MerkleHash, u64)> = Vec::new();
 
-        for (i, entry) in file_block.entries.iter().enumerate() {
-            let xorb_hash_hex = entry.cas_hash.to_hex();
+        for term_idx in 0..num_entries {
+            let entry = file_view.entry(term_idx);
+            let xorb_hash_hex = entry.xorb_hash.hex();
             validate_hash(&xorb_hash_hex)?;
-
-            if !state.storage.xorb_exists(&xorb_hash_hex).await? {
-                return Err(AppError::BadRequest(format!(
-                    "referenced xorb not found: {xorb_hash_hex}"
-                )));
-            }
 
             let chunk_start = entry.chunk_index_start as usize;
             let chunk_end = entry.chunk_index_end as usize;
             if chunk_end <= chunk_start {
                 return Err(AppError::BadRequest(format!(
-                    "file {} term {i} has empty or inverted chunk range [{chunk_start},{chunk_end})",
-                    file_block.header.file_hash.to_hex()
+                    "file {} term {term_idx} has empty or inverted chunk range [{chunk_start},{chunk_end})",
+                    file_view.file_hash().hex()
                 )));
             }
 
-            let xorb_data = state.storage.get_xorb(&xorb_hash_hex).await?;
-            let chunks =
-                deserialize_xorb_range(&xorb_data, chunk_start, chunk_end).map_err(|e| {
-                    AppError::BadRequest(format!(
-                        "failed to read xorb {xorb_hash_hex} chunks [{chunk_start},{chunk_end}): {e}"
-                    ))
-                })?;
+            let info = match xorb_meta_cache.get(&xorb_hash_hex) {
+                Some(info) => info.clone(),
+                None => {
+                    if !state.storage.xorb_exists(&xorb_hash_hex).await? {
+                        return Err(AppError::BadRequest(format!(
+                            "referenced xorb not found: {xorb_hash_hex}"
+                        )));
+                    }
+                    let xorb_data = state.storage.get_xorb(&xorb_hash_hex).await?;
+                    let info = Arc::new(xorb_info_from_stored(&xorb_data)?);
+                    xorb_meta_cache.insert(xorb_hash_hex.clone(), info.clone());
+                    info
+                }
+            };
 
-            // The term must resolve to exactly the chunks it claims.
-            if chunks.len() != chunk_end - chunk_start {
+            if chunk_end > info.num_chunks as usize {
                 return Err(AppError::BadRequest(format!(
-                    "xorb {xorb_hash_hex} term [{chunk_start},{chunk_end}) resolved {} chunks",
-                    chunks.len()
+                    "xorb {xorb_hash_hex} term [{chunk_start},{chunk_end}) exceeds its {} chunks",
+                    info.num_chunks
                 )));
             }
 
-            let chunk_hashes: Vec<MerkleHash> =
-                chunks.iter().map(|c| compute_chunk_hash(&c.data)).collect();
+            let chunk_hashes = &info.chunk_hashes[chunk_start..chunk_end];
 
             // Validate the per-term verification hash if the shard carries one.
-            if i < file_block.verification_entries.len() {
-                let computed = compute_verification_hash(&chunk_hashes);
-                let expected = &file_block.verification_entries[i].range_hash;
+            if file_view.contains_verification() {
+                let computed = range_hash_from_chunks(chunk_hashes);
+                let expected = file_view.verification(term_idx).range_hash;
 
-                if &computed != expected {
+                if computed != expected {
                     return Err(AppError::BadRequest(format!(
-                        "verification hash mismatch for file {} term {i}: computed={}, expected={}",
-                        file_block.header.file_hash.to_hex(),
-                        computed.to_hex(),
-                        expected.to_hex()
+                        "verification hash mismatch for file {} term {term_idx}: computed={}, expected={}",
+                        file_view.file_hash().hex(),
+                        computed.hex(),
+                        expected.hex()
                     )));
                 }
             }
 
-            for (h, c) in chunk_hashes.iter().zip(chunks.iter()) {
-                file_chunks.push((*h, c.data.len()));
+            let mut prev_unpacked = if chunk_start == 0 {
+                0
+            } else {
+                info.unpacked_chunk_offsets[chunk_start - 1]
+            };
+            for k in chunk_start..chunk_end {
+                let unpacked_end = info.unpacked_chunk_offsets[k];
+                file_chunks.push((info.chunk_hashes[k], (unpacked_end - prev_unpacked) as u64));
+                prev_unpacked = unpacked_end;
             }
         }
 
-        let computed_file_hash = compute_file_hash(&file_chunks);
-        if computed_file_hash != file_block.header.file_hash {
+        let computed_file_hash = file_hash(&file_chunks);
+        if computed_file_hash != file_view.file_hash() {
             return Err(AppError::BadRequest(format!(
                 "file hash mismatch: declared={}, computed={}",
-                file_block.header.file_hash.to_hex(),
-                computed_file_hash.to_hex()
+                file_view.file_hash().hex(),
+                computed_file_hash.hex()
             )));
         }
     }
 
-    // Content-address the shard: blake3 hash of the raw bytes (unkeyed)
-    let shard_hash_bytes = blake3::hash(&body);
-    let shard_hash = MerkleHash::from_bytes(*shard_hash_bytes.as_bytes());
-    let shard_hash_hex = shard_hash.to_hex();
+    // Content-address the shard the same way xet-core names shard files:
+    // keyed blake3 (compute_data_hash) over the raw bytes.
+    let shard_hash_hex = compute_data_hash(&body).hex();
 
     // Store the shard
     let was_inserted = state.storage.put_shard(&shard_hash_hex, body).await?;
 
     // Index file hashes
-    for file_block in &shard.file_info_blocks {
-        let file_hash_hex = file_block.header.file_hash.to_hex();
+    for file_idx in 0..shard.num_files() {
+        let file_view = shard.file(file_idx).expect("index in range");
         state
             .file_index
-            .put(&file_hash_hex, &shard_hash_hex)
+            .put(&file_view.file_hash().hex(), &shard_hash_hex)
             .await?;
     }
 
-    // Index chunk hashes from CAS info section in one batched write
-    let entries: Vec<(String, ChunkLocation)> = shard
-        .cas_info_blocks
-        .iter()
-        .flat_map(|cas_block| {
-            let xorb_hash_hex = cas_block.header.cas_hash.to_hex();
-            cas_block.entries.iter().enumerate().map(move |(i, entry)| {
+    // Index chunk hashes from the xorb (CAS info) section in one batched write
+    let entries: Vec<(String, ChunkLocation)> = (0..shard.num_xorb())
+        .filter_map(|i| shard.xorb(i))
+        .flat_map(|xorb_view| {
+            let xorb_hash_hex = xorb_view.xorb_hash().hex();
+            (0..xorb_view.num_entries()).map(move |i| {
                 (
-                    entry.chunk_hash.to_hex(),
+                    xorb_view.chunk(i).chunk_hash.hex(),
                     ChunkLocation {
                         xorb_hash: xorb_hash_hex.clone(),
                         chunk_index: i as u32,

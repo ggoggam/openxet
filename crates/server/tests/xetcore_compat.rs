@@ -1,143 +1,34 @@
-//! Integration tests simulating xet-core's RemoteClient behavior.
+//! Integration tests exercising xet-core's RemoteClient behavior.
 //!
 //! These tests verify that our server is wire-compatible with HuggingFace's
-//! xet-core client by replicating the exact HTTP request patterns, URL paths,
-//! body formats, and response parsing that xet-core uses.
+//! xet-core client by using the *actual* xet-core-structures client
+//! primitives (xorb serialization, shard parsing, dedup queries,
+//! deserialize_chunks) against our HTTP endpoints, replicating xet-core's
+//! request patterns, URL paths, and response parsing.
 
 mod helpers;
 
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use std::io::Cursor;
 
-use openxet_cas_types::chunk::{ChunkHeader, decompress_chunk};
 use openxet_cas_types::reconstruction::QueryReconstructionResponse;
-use openxet_cas_types::shard::Shard;
-use openxet_hashing::MerkleHash;
+use xet_core_structures::metadata_shard::MDBShardInfo;
+use xet_core_structures::xorb_object::{XorbObject, deserialize_chunks};
 
 use helpers::{TestServer, build_upload_artifacts, generate_test_data, upload_artifacts};
 
-type HmacSha256 = Hmac<Sha256>;
+// ─── Client-side helpers (the same code paths real xet-core clients run) ─────
 
-// ─── xet-core xorb format helpers ────────────────────────────────────────────
-
-/// Simulate what xet-core does: append a CasObjectInfoV1 footer to a serialized xorb.
-///
-/// The footer contains chunk hashes and boundary info for efficient random access.
-/// Format:
-///   "XETBLOB" (7B) + version(1B) + xorb_hash(32B)
-///   "XBLBHSH" (7B) + version(1B) + num_chunks(4B) + chunk_hashes(32B each)
-///   "XBLBBND" (7B) + version(1B) + num_chunks(4B) + compressed_offsets(4B each) + uncompressed_offsets(4B each)
-///   trailer: num_chunks(4B) + hash_offset(4B) + boundary_offset(4B) + reserved(16B)
-///   info_length(4B)
-fn append_cas_object_footer(
-    xorb_data: &[u8],
-    xorb_hash: &MerkleHash,
-    chunk_hashes: &[MerkleHash],
-    compressed_offsets: &[u32],
-    uncompressed_offsets: &[u32],
-) -> Vec<u8> {
-    let num_chunks = chunk_hashes.len() as u32;
-    let mut footer = Vec::new();
-
-    // Header section
-    footer.extend_from_slice(b"XETBLOB");
-    footer.push(1); // version
-    footer.extend_from_slice(xorb_hash.as_bytes());
-
-    // Hash section
-    let hash_section_start = footer.len();
-    footer.extend_from_slice(b"XBLBHSH");
-    footer.push(0); // version
-    footer.extend_from_slice(&num_chunks.to_le_bytes());
-    for h in chunk_hashes {
-        footer.extend_from_slice(h.as_bytes());
-    }
-
-    // Boundary section
-    let boundary_section_start = footer.len();
-    footer.extend_from_slice(b"XBLBBND");
-    footer.push(1); // version
-    footer.extend_from_slice(&num_chunks.to_le_bytes());
-    for off in compressed_offsets {
-        footer.extend_from_slice(&off.to_le_bytes());
-    }
-    for off in uncompressed_offsets {
-        footer.extend_from_slice(&off.to_le_bytes());
-    }
-
-    // Trailer
-    let footer_end = footer.len() + 4 + 4 + 4 + 16;
-    footer.extend_from_slice(&num_chunks.to_le_bytes());
-    footer.extend_from_slice(&((footer_end - hash_section_start) as u32).to_le_bytes());
-    footer.extend_from_slice(&((footer_end - boundary_section_start) as u32).to_le_bytes());
-    footer.extend_from_slice(&[0u8; 16]); // reserved
-
-    let info_length = footer.len() as u32;
-    footer.extend_from_slice(&info_length.to_le_bytes());
-
-    let mut result = xorb_data.to_vec();
-    result.extend_from_slice(&footer);
-    result
+/// Strip the trailing XorbObjectInfoV1 footer from a serialized xorb, leaving
+/// only the raw chunk frames — the spec-minimal upload form.
+fn strip_xorb_footer(xorb_bytes: &[u8]) -> Vec<u8> {
+    let xorb = XorbObject::deserialize(&mut Cursor::new(xorb_bytes)).unwrap();
+    let chunk_region_end = *xorb.info.chunk_boundary_offsets.last().unwrap() as usize;
+    xorb_bytes[..chunk_region_end].to_vec()
 }
-
-/// Build xorb data with CasObjectInfoV1 footer, mimicking xet-core's SerializedCasObject.
-fn build_xorb_with_footer(
-    artifacts: &helpers::UploadArtifacts,
-    xorb_index: usize,
-) -> (String, Vec<u8>) {
-    let (hash, raw_data) = &artifacts.xorb_entries[xorb_index];
-
-    // Walk chunk headers to gather offsets
-    let mut chunk_hashes = Vec::new();
-    let mut compressed_offsets = Vec::new();
-    let mut uncompressed_offsets = Vec::new();
-    let mut pos = 0usize;
-    let mut uncompressed_pos = 0u32;
-
-    while pos + ChunkHeader::SIZE <= raw_data.len() {
-        let header_bytes: [u8; 8] = raw_data[pos..pos + 8].try_into().unwrap();
-        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-            break;
-        };
-
-        compressed_offsets.push(pos as u32);
-        uncompressed_offsets.push(uncompressed_pos);
-
-        let compressed_start = pos + ChunkHeader::SIZE;
-        let compressed_end = compressed_start + header.compressed_size as usize;
-        if compressed_end > raw_data.len() {
-            break;
-        }
-
-        let compressed = &raw_data[compressed_start..compressed_end];
-        let decompressed = decompress_chunk(
-            compressed,
-            header.compression_type,
-            header.uncompressed_size as usize,
-        )
-        .unwrap();
-
-        chunk_hashes.push(openxet_hashing::compute_chunk_hash(&decompressed));
-        uncompressed_pos += decompressed.len() as u32;
-        pos = compressed_end;
-    }
-
-    let xorb_hash = MerkleHash::from_hex(hash).unwrap();
-    let with_footer = append_cas_object_footer(
-        raw_data,
-        &xorb_hash,
-        &chunk_hashes,
-        &compressed_offsets,
-        &uncompressed_offsets,
-    );
-
-    (hash.clone(), with_footer)
-}
-
-// ─── Reconstruction helpers (simulating xet-core client download) ────────────
 
 /// Simulate xet-core's download flow: given a QueryReconstructionResponse,
-/// fetch xorb ranges, parse chunk headers, decompress, and reconstruct the file.
+/// fetch xorb byte ranges and decode them with the same `deserialize_chunks`
+/// call xet-core's RemoteClient uses, then assemble the file.
 async fn reconstruct_file_from_response(
     client: &reqwest::Client,
     recon: &QueryReconstructionResponse,
@@ -182,48 +73,23 @@ async fn reconstruct_file_from_response(
 
         let xorb_range_data = resp.bytes().await.unwrap();
 
-        // Parse chunk headers from the fetched range and decompress
-        let mut chunks = Vec::new();
-        let mut pos = 0usize;
-
-        while pos + ChunkHeader::SIZE <= xorb_range_data.len() {
-            let header_bytes: [u8; 8] = xorb_range_data[pos..pos + 8].try_into().unwrap();
-            let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-                break;
-            };
-
-            let compressed_start = pos + ChunkHeader::SIZE;
-            let compressed_end = compressed_start + header.compressed_size as usize;
-            if compressed_end > xorb_range_data.len() {
-                break;
-            }
-
-            let compressed = &xorb_range_data[compressed_start..compressed_end];
-            let decompressed = decompress_chunk(
-                compressed,
-                header.compression_type,
-                header.uncompressed_size as usize,
-            )
-            .unwrap();
-
-            chunks.push(decompressed);
-            pos = compressed_end;
-        }
+        // Decode the fetched chunk frames exactly as xet-core does.
+        let (decoded, boundaries) =
+            deserialize_chunks(&mut Cursor::new(&xorb_range_data[..])).unwrap();
 
         // The fetch_info range may cover more chunks than this term needs.
-        // Select only the chunks for this term's sub-range within the fetch_info range.
+        // Select this term's sub-range within the fetched slice.
         let local_start = term.range.start - fi.range.start;
         let local_end = term.range.end - fi.range.start;
+        assert!(local_end < boundaries.len());
 
-        for chunk in &chunks[local_start..local_end.min(chunks.len())] {
-            if term_idx == 0 && recon.offset_into_first_range > 0 {
-                let skip = recon.offset_into_first_range as usize;
-                if skip < chunk.len() {
-                    result.extend_from_slice(&chunk[skip..]);
-                }
-            } else {
-                result.extend_from_slice(chunk);
-            }
+        let term_bytes = &decoded[boundaries[local_start] as usize..boundaries[local_end] as usize];
+
+        if term_idx == 0 {
+            let skip = recon.offset_into_first_range as usize;
+            result.extend_from_slice(&term_bytes[skip.min(term_bytes.len())..]);
+        } else {
+            result.extend_from_slice(term_bytes);
         }
     }
 
@@ -286,38 +152,42 @@ async fn test_xetcore_shard_path_without_v1_prefix() {
     assert_eq!(resp.status(), 200);
 }
 
-/// Test 2: xet-core sends xorbs WITH CasObjectInfoV1 footer appended.
-/// Our server must accept and store them correctly.
+/// Test 2: spec-minimal clients may upload xorbs WITHOUT the metadata footer.
+/// Our server must validate and store those too (real xet-core always
+/// includes the footer; that path is covered by every other test here since
+/// build_upload_artifacts serializes through SerializedXorbObject).
 #[tokio::test]
-async fn test_xetcore_xorb_with_cas_object_footer() {
+async fn test_footerless_xorb_upload_accepted() {
     let server = TestServer::start().await;
     let data = generate_test_data(256 * 1024);
     let artifacts = build_upload_artifacts(&data);
     let token = server.write_token();
 
-    // Upload xorbs WITH footer (as xet-core does)
-    for i in 0..artifacts.xorb_entries.len() {
-        let (hash, xorb_with_footer) = build_xorb_with_footer(&artifacts, i);
+    // Upload xorbs with the footer stripped (hash is over chunk content, so
+    // it is unchanged).
+    for (hash, xorb_data) in &artifacts.xorb_entries {
+        let footerless = strip_xorb_footer(xorb_data);
+        assert!(footerless.len() < xorb_data.len());
 
         let resp = server
             .client
             .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
             .bearer_auth(&token)
-            .body(xorb_with_footer)
+            .body(footerless)
             .send()
             .await
             .unwrap();
         assert_eq!(
             resp.status(),
             200,
-            "xorb with CasObjectInfoV1 footer should be accepted"
+            "footer-less xorb should be accepted after content validation"
         );
 
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["was_inserted"], true);
     }
 
-    // Upload shard
+    // Shard registration + full reconstruction still work
     let resp = server
         .client
         .post(format!("{}/shards", server.base_url))
@@ -328,7 +198,6 @@ async fn test_xetcore_xorb_with_cas_object_footer() {
         .unwrap();
     assert_eq!(resp.status(), 200);
 
-    // Verify reconstruction works with footer-bearing xorbs
     let resp = server
         .client
         .get(format!(
@@ -342,53 +211,50 @@ async fn test_xetcore_xorb_with_cas_object_footer() {
     assert_eq!(resp.status(), 200);
 
     let recon: QueryReconstructionResponse = resp.json().await.unwrap();
-    assert!(!recon.terms.is_empty());
-
-    // Verify we can reconstruct the full file from the response
     let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
-    assert_eq!(
-        reconstructed.len(),
-        data.len(),
-        "reconstructed file size mismatch"
-    );
-    assert_eq!(reconstructed, data, "reconstructed file content mismatch");
+    assert_eq!(reconstructed, data);
 }
 
-/// Test 3: Full xet-core upload + download round-trip with large data.
-/// Generates ~2 MiB of pseudo-random data to ensure multiple xorb groups
-/// and multiple CDC chunks, then reconstructs via the client download flow.
+/// Test 3: a xorb whose trailing bytes are not a valid footer must be
+/// rejected — the server would otherwise store metadata it can't trust.
+#[tokio::test]
+async fn test_corrupt_footer_rejected() {
+    let server = TestServer::start().await;
+    let data = generate_test_data(128 * 1024);
+    let artifacts = build_upload_artifacts(&data);
+    let token = server.write_token();
+
+    let (hash, xorb_data) = &artifacts.xorb_entries[0];
+    let mut corrupted = xorb_data.to_vec();
+    // Flip bytes inside the footer's chunk-hash section (past the chunk region).
+    let footer_start = strip_xorb_footer(xorb_data).len();
+    corrupted[footer_start + 10] ^= 0xFF;
+    corrupted[footer_start + 11] ^= 0xFF;
+
+    let resp = server
+        .client
+        .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
+        .bearer_auth(&token)
+        .body(corrupted)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        400,
+        "xorb with corrupt footer must be rejected"
+    );
+}
+
+/// Test 4: Full xet-core upload + download round-trip with large data.
+/// Generates ~2 MiB of pseudo-random data to ensure multiple CDC chunks,
+/// then reconstructs via the client download flow.
 #[tokio::test]
 async fn test_xetcore_full_roundtrip_large_file() {
     let server = TestServer::start().await;
     let data = generate_test_data(2 * 1024 * 1024); // 2 MiB
     let artifacts = build_upload_artifacts(&data);
-    let token = server.write_token();
-
-    // Upload xorbs (with footer, as xet-core does)
-    for i in 0..artifacts.xorb_entries.len() {
-        let (hash, xorb_with_footer) = build_xorb_with_footer(&artifacts, i);
-
-        let resp = server
-            .client
-            .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
-            .bearer_auth(&token)
-            .body(xorb_with_footer)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-    }
-
-    // Upload shard via /shards (xet-core path)
-    let resp = server
-        .client
-        .post(format!("{}/shards", server.base_url))
-        .bearer_auth(&token)
-        .body(artifacts.shard_bytes.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    upload_artifacts(&server, &artifacts).await;
 
     // Download: query reconstruction (as xet-core does)
     let read_token = server.read_token();
@@ -427,7 +293,8 @@ async fn test_xetcore_full_roundtrip_large_file() {
     assert_eq!(reconstructed, data);
 }
 
-/// Test 4: xet-core dedup flow — query chunk, verify HMAC, find matches.
+/// Test 5: xet-core dedup flow — query chunk, parse the keyed shard with the
+/// real client parser, and match raw chunk hashes through the HMAC.
 #[tokio::test]
 async fn test_xetcore_dedup_flow() {
     let server = TestServer::start().await;
@@ -438,8 +305,8 @@ async fn test_xetcore_dedup_flow() {
     let read_token = server.read_token();
 
     // Query dedup for a known chunk (as xet-core does)
-    let chunk_hash = &artifacts.chunk_hashes[0];
-    let chunk_hash_hex = chunk_hash.to_hex();
+    let chunk_hash = artifacts.chunk_hashes[0];
+    let chunk_hash_hex = chunk_hash.hex();
 
     let resp = server
         .client
@@ -454,45 +321,47 @@ async fn test_xetcore_dedup_flow() {
     assert_eq!(resp.status(), 200);
 
     let shard_bytes = resp.bytes().await.unwrap();
-    let shard = Shard::from_bytes(&shard_bytes).expect("dedup response should be valid shard");
+    let mut reader = Cursor::new(&shard_bytes[..]);
+    let shard_info = MDBShardInfo::load_from_reader(&mut reader)
+        .expect("dedup response should parse with the real client parser");
 
-    // xet-core expects: footer with HMAC key
-    let footer = shard.footer.as_ref().expect("dedup shard must have footer");
-    assert!(footer.has_hmac_key(), "footer must contain HMAC key");
+    // xet-core expects: footer with HMAC key and a future expiry
+    let key = shard_info
+        .chunk_hmac_key()
+        .expect("dedup shard must carry an HMAC key");
     assert!(
-        footer.shard_key_expiry > footer.shard_creation_timestamp,
+        shard_info.metadata.shard_key_expiry > shard_info.metadata.shard_creation_timestamp,
         "key expiry must be in the future"
     );
 
-    // xet-core expects: CAS info blocks with HMAC-protected chunk hashes
+    // xet-core expects: xorb (CAS) info with HMAC-keyed chunk hashes
+    let xorb_blocks = shard_info.read_all_xorb_blocks_full(&mut reader).unwrap();
     assert!(
-        !shard.cas_info_blocks.is_empty(),
-        "dedup shard must have CAS info blocks"
+        !xorb_blocks.is_empty(),
+        "dedup shard must have xorb info blocks"
     );
 
-    // xet-core verifies its own chunk hash by HMAC-ing it with the footer key
-    let mut mac =
-        HmacSha256::new_from_slice(&footer.chunk_hash_hmac_key).expect("HMAC key length valid");
-    mac.update(chunk_hash.as_bytes());
-    let hmac_result = mac.finalize().into_bytes();
-    let expected_hmac = MerkleHash::from_bytes(hmac_result.into());
-
-    // Find the HMAC'd hash in the CAS info entries
-    let mut found = false;
-    for block in &shard.cas_info_blocks {
-        for entry in &block.entries {
-            if entry.chunk_hash == expected_hmac {
-                found = true;
-            }
-        }
-    }
+    // The blake3-keyed HMAC of our raw chunk hash must appear in the entries
+    let keyed = chunk_hash.hmac(key);
+    let found = xorb_blocks
+        .iter()
+        .flat_map(|b| &b.chunks)
+        .any(|e| e.chunk_hash == keyed);
     assert!(
         found,
         "HMAC of queried chunk hash should appear in dedup response"
     );
+
+    // And the end-to-end client query path agrees
+    let (matched, entry) = shard_info
+        .chunk_hash_dedup_query(&mut reader, &artifacts.chunk_hashes)
+        .unwrap()
+        .expect("dedup query must match the uploaded chunks");
+    assert!(matched >= 1);
+    assert_eq!(entry.xorb_hash.hex(), artifacts.xorb_entries[0].0);
 }
 
-/// Test 5: xet-core reconstruction with Range header for partial download.
+/// Test 6: xet-core reconstruction with Range header for partial download.
 #[tokio::test]
 async fn test_xetcore_range_reconstruction() {
     let server = TestServer::start().await;
@@ -530,9 +399,17 @@ async fn test_xetcore_range_reconstruction() {
         effective_bytes >= requested_bytes,
         "effective bytes ({effective_bytes}) must cover requested range ({requested_bytes})"
     );
+
+    // The ranged reconstruction actually decodes to the right bytes
+    let reconstructed = reconstruct_file_from_response(&server.client, &recon).await;
+    assert!(reconstructed.len() as u64 >= requested_bytes);
+    assert_eq!(
+        &reconstructed[..requested_bytes as usize],
+        &data[range_start as usize..=range_end as usize],
+    );
 }
 
-/// Test 6: xet-core response format validation.
+/// Test 7: xet-core response format validation.
 /// Verifies JSON field names and types match xet-core's expected deserialization.
 #[tokio::test]
 async fn test_xetcore_response_format_compat() {
@@ -670,46 +547,22 @@ async fn test_xetcore_response_format_compat() {
     }
 }
 
-/// Test 7: Very large file (10 MiB) — ensures multiple xorb groups work correctly
+/// Test 8: Very large file (10 MiB) — ensures many chunks work correctly
 /// with the xet-core client download flow.
 #[tokio::test]
 async fn test_xetcore_large_file_multi_xorb() {
     let server = TestServer::start().await;
     let data = generate_test_data(10 * 1024 * 1024); // 10 MiB
     let artifacts = build_upload_artifacts(&data);
-    let token = server.write_token();
 
-    // Should produce multiple chunks given CDC parameters (target 64K, min 8K, max 128K)
+    // Should produce multiple chunks given CDC parameters (target 64K)
     assert!(
         artifacts.chunk_hashes.len() > 50,
         "10 MiB should produce many chunks (got {})",
         artifacts.chunk_hashes.len()
     );
 
-    // Upload all xorbs with footer
-    for i in 0..artifacts.xorb_entries.len() {
-        let (hash, xorb_with_footer) = build_xorb_with_footer(&artifacts, i);
-        let resp = server
-            .client
-            .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
-            .bearer_auth(&token)
-            .body(xorb_with_footer)
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), 200);
-    }
-
-    // Upload shard via /shards
-    let resp = server
-        .client
-        .post(format!("{}/shards", server.base_url))
-        .bearer_auth(&token)
-        .body(artifacts.shard_bytes.clone())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), 200);
+    upload_artifacts(&server, &artifacts).await;
 
     // Full reconstruction
     let read_token = server.read_token();
@@ -733,7 +586,7 @@ async fn test_xetcore_large_file_multi_xorb() {
     assert_eq!(reconstructed, data);
 }
 
-/// Test 8: Dedup across two uploads — xet-core relies on dedup to avoid
+/// Test 9: Dedup across two uploads — xet-core relies on dedup to avoid
 /// re-uploading chunks that already exist on the server.
 #[tokio::test]
 async fn test_xetcore_dedup_across_uploads() {
@@ -754,7 +607,7 @@ async fn test_xetcore_dedup_across_uploads() {
             .get(format!(
                 "{}/v1/chunks/default-merkledb/{}",
                 server.base_url,
-                chunk_hash.to_hex()
+                chunk_hash.hex()
             ))
             .bearer_auth(&read_token)
             .send()
@@ -792,38 +645,14 @@ async fn test_xetcore_dedup_across_uploads() {
     }
 }
 
-/// Test 9: Verify the server handles xet-core's reconstruction response correctly
-/// when there are xorbs with footer bytes — the url_range in fetch_info must
-/// still point to valid chunk data (not include the footer).
+/// Test 10: fetch_info url_range must cover exactly the chunk frames (never
+/// the metadata footer), and every fetched range must decode cleanly.
 #[tokio::test]
-async fn test_xetcore_fetch_info_url_range_with_footer() {
+async fn test_xetcore_fetch_info_url_range_excludes_footer() {
     let server = TestServer::start().await;
     let data = generate_test_data(128 * 1024);
     let artifacts = build_upload_artifacts(&data);
-    let token = server.write_token();
-
-    // Upload xorbs with footer
-    for i in 0..artifacts.xorb_entries.len() {
-        let (hash, xorb_with_footer) = build_xorb_with_footer(&artifacts, i);
-        server
-            .client
-            .post(format!("{}/v1/xorbs/default/{hash}", server.base_url))
-            .bearer_auth(&token)
-            .body(xorb_with_footer)
-            .send()
-            .await
-            .unwrap();
-    }
-
-    // Upload shard
-    server
-        .client
-        .post(format!("{}/shards", server.base_url))
-        .bearer_auth(&token)
-        .body(artifacts.shard_bytes.clone())
-        .send()
-        .await
-        .unwrap();
+    upload_artifacts(&server, &artifacts).await;
 
     // Get reconstruction
     let read_token = server.read_token();
@@ -840,7 +669,6 @@ async fn test_xetcore_fetch_info_url_range_with_footer() {
 
     let recon: QueryReconstructionResponse = resp.json().await.unwrap();
 
-    // For each fetch_info entry, verify the url_range points to parseable chunk data
     for (xorb_hash, infos) in &recon.fetch_info {
         for info in infos {
             // Fetched without an Authorization header, as xet-core does.
@@ -857,32 +685,11 @@ async fn test_xetcore_fetch_info_url_range_with_footer() {
 
             let range_data = resp.bytes().await.unwrap();
 
-            // Parse all chunks in the range — they must all be valid
-            let mut pos = 0usize;
-            let mut chunk_count = 0;
-            while pos + ChunkHeader::SIZE <= range_data.len() {
-                let header_bytes: [u8; 8] = range_data[pos..pos + 8].try_into().unwrap();
-                let header = ChunkHeader::from_bytes(&header_bytes).unwrap_or_else(|e| {
-                    panic!("invalid chunk header in {xorb_hash} at byte {pos}: {e}")
-                });
-
-                let compressed_end = pos + ChunkHeader::SIZE + header.compressed_size as usize;
-                assert!(
-                    compressed_end <= range_data.len(),
-                    "chunk data extends beyond fetched range in {xorb_hash}"
-                );
-
-                let compressed = &range_data[pos + ChunkHeader::SIZE..compressed_end];
-                decompress_chunk(
-                    compressed,
-                    header.compression_type,
-                    header.uncompressed_size as usize,
-                )
-                .unwrap_or_else(|e| panic!("failed to decompress chunk in {xorb_hash}: {e}"));
-
-                chunk_count += 1;
-                pos = compressed_end;
-            }
+            // Every fetched range must decode with the client's chunk-frame
+            // decoder — a footer byte in the range would make this fail.
+            let (_, boundaries) = deserialize_chunks(&mut Cursor::new(&range_data[..]))
+                .unwrap_or_else(|e| panic!("range for {xorb_hash} failed to decode: {e}"));
+            let chunk_count = boundaries.len() - 1;
 
             assert!(
                 chunk_count >= (info.range.end - info.range.start),

@@ -5,16 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-openxet-hashing = { workspace = true }
-bytes = { workspace = true }
-lz4_flex = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-hex = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
 
 [dev-dependencies]
-openxet-chunking = { workspace = true }
+serde_json = { workspace = true }
+xet-core-structures = { workspace = true }
+xet-data = { workspace = true }
 reqwest = { version = "0.12", features = ["blocking"] }

@@ -1,9 +1,6 @@
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 
-use openxet_cas_types::shard::ShardError;
-use openxet_cas_types::xorb::XorbError;
-
 use crate::storage::StorageError;
 
 #[derive(Debug, thiserror::Error)]
@@ -78,17 +75,5 @@ impl From<StorageError> for AppError {
             }
             StorageError::Index(msg) => AppError::Internal(anyhow::anyhow!("index error: {msg}")),
         }
-    }
-}
-
-impl From<XorbError> for AppError {
-    fn from(err: XorbError) -> Self {
-        AppError::BadRequest(format!("invalid xorb: {err}"))
-    }
-}
-
-impl From<ShardError> for AppError {
-    fn from(err: ShardError) -> Self {
-        AppError::BadRequest(format!("invalid shard: {err}"))
     }
 }

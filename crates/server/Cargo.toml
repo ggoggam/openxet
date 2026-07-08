@@ -9,19 +9,15 @@ name = "openxet-server"
 path = "src/main.rs"
 
 [dependencies]
-openxet-hashing = { workspace = true }
-openxet-chunking = { workspace = true }
 openxet-cas-types = { workspace = true }
+xet-core-structures = { workspace = true }
 tokio = { version = "1", features = ["full"] }
 bytes = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
-blake3 = { workspace = true }
 hex = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"
@@ -38,6 +34,7 @@ rocksdb = "0.24.0"
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "tls-rustls-ring", "postgres"] }
 
 [dev-dependencies]
+xet-data = { workspace = true }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 reqwest = { version = "0.12", features = ["json"] }

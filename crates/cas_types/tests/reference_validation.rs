@@ -1,23 +1,29 @@
-//! Integration tests validating our implementation against the official
-//! xet-spec-reference-files from HuggingFace.
+//! Integration tests validating our use of the xet-core crates against the
+//! official xet-spec-reference-files from HuggingFace.
 //!
 //! Reference: https://huggingface.co/datasets/xet-team/xet-spec-reference-files
+//!
+//! The formats and hashes come from the pinned `xet-core-structures` /
+//! `xet-data` crates, so these tests primarily pin the *wire format* across
+//! version bumps of those crates: if an upgrade changes chunking boundaries,
+//! hashing, or serialization, these fail before anything ships.
 //!
 //! Reference files are downloaded on first use into a temp directory and
 //! reused across runs. Set `OPENXET_TEST_DATA_DIR` to override the cache
 //! location, or pre-populate it to run offline.
 use std::fs;
+use std::io::Cursor;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use openxet_cas_types::chunk::{ChunkHeader, CompressionType};
-use openxet_cas_types::shard::Shard;
-use openxet_cas_types::xorb;
-use openxet_chunking::chunk_data;
-use openxet_hashing::{
-    MerkleHash, compute_chunk_hash, compute_file_hash, compute_merkle_root,
-    compute_verification_hash,
+use xet_core_structures::merklehash::{MerkleHash, compute_data_hash, file_hash, xorb_hash};
+use xet_core_structures::metadata_shard::MDBShardInfo;
+use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chunks;
+use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
+use xet_core_structures::xorb_object::{
+    Chunk, CompressionScheme, XORB_CHUNK_HEADER_LENGTH, parse_chunk_header,
 };
+use xet_data::deduplication::Chunker;
 
 const HF_BASE_URL: &str =
     "https://huggingface.co/datasets/xet-team/xet-spec-reference-files/resolve/main/";
@@ -100,40 +106,44 @@ fn parse_chunks_file(path: &std::path::PathBuf) -> Vec<(String, usize)> {
         .collect()
 }
 
+fn chunk_reference_csv() -> (Vec<u8>, Vec<Chunk>) {
+    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let chunks = Chunker::default().next_block(&csv_data, true);
+    (csv_data, chunks)
+}
+
 // ─── Chunk Hash Tests ────────────────────────────────────────────────────────
 
 #[test]
 fn test_chunk_hash_reference_chunk1() {
     let data = fs::read(test_data_path("chunk1.bin")).unwrap();
-    let hash = compute_chunk_hash(&data);
+    let hash = compute_data_hash(&data);
     let expected_hex = "b10aa1dc71c61661de92280c41a188aabc47981739b785724a099945d8dc5ce4";
-    assert_eq!(hash.to_hex(), expected_hex, "chunk1 hash mismatch");
+    assert_eq!(hash.hex(), expected_hex, "chunk1 hash mismatch");
 }
 
 #[test]
 fn test_chunk_hash_reference_chunk2() {
     let data = fs::read(test_data_path("chunk2.bin")).unwrap();
-    let hash = compute_chunk_hash(&data);
+    let hash = compute_data_hash(&data);
     let expected_hex = "26255591fa803b6baf25d88c315b8a6f5153d5bcfdf18ec5ef526264e0ccc907";
-    assert_eq!(hash.to_hex(), expected_hex, "chunk2 hash mismatch");
+    assert_eq!(hash.hex(), expected_hex, "chunk2 hash mismatch");
 }
 
 #[test]
 fn test_chunk_hash_reference_chunk3() {
     let data = fs::read(test_data_path("chunk3.bin")).unwrap();
-    let hash = compute_chunk_hash(&data);
+    let hash = compute_data_hash(&data);
     let expected_hex = "099cb228194fe640e36a6c7d274ee5ed3a714ccd557a0951d9b6b43a7292b5d1";
-    assert_eq!(hash.to_hex(), expected_hex, "chunk3 hash mismatch");
+    assert_eq!(hash.hex(), expected_hex, "chunk3 hash mismatch");
 }
 
 // ─── Chunking Boundary Tests ─────────────────────────────────────────────────
 
 #[test]
 fn test_chunking_boundaries_match_reference() {
-    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let (_, chunks) = chunk_reference_csv();
     let ref_chunks = parse_chunks_file(&test_data_path("chunks.txt"));
-
-    let chunks = chunk_data(&csv_data);
 
     assert_eq!(
         chunks.len(),
@@ -146,30 +156,28 @@ fn test_chunking_boundaries_match_reference() {
     // Verify chunk sizes match
     for (i, (chunk, (_, expected_size))) in chunks.iter().zip(ref_chunks.iter()).enumerate() {
         assert_eq!(
-            chunk.length, *expected_size,
+            chunk.data.len(),
+            *expected_size,
             "chunk {} size mismatch: got {}, expected {}",
-            i, chunk.length, *expected_size
+            i,
+            chunk.data.len(),
+            *expected_size
         );
     }
 }
 
 #[test]
 fn test_chunk_hashes_match_reference() {
-    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let (_, chunks) = chunk_reference_csv();
     let ref_chunks = parse_chunks_file(&test_data_path("chunks.txt"));
-
-    let chunks = chunk_data(&csv_data);
 
     // Verify chunk hashes match
     for (i, (chunk, (expected_hash, _))) in chunks.iter().zip(ref_chunks.iter()).enumerate() {
-        let chunk_bytes = &csv_data[chunk.offset..chunk.offset + chunk.length];
-        let hash = compute_chunk_hash(chunk_bytes);
         assert_eq!(
-            hash.to_hex(),
+            chunk.hash.hex(),
             *expected_hash,
-            "chunk {} hash mismatch at offset {}",
+            "chunk {} hash mismatch",
             i,
-            chunk.offset
         );
     }
 }
@@ -178,80 +186,61 @@ fn test_chunk_hashes_match_reference() {
 
 #[test]
 fn test_xorb_hash_matches_reference() {
-    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let (_, chunks) = chunk_reference_csv();
     let ref_chunks = parse_chunks_file(&test_data_path("chunks.txt"));
     let expected_xorb_hash = fs::read_to_string(test_data_path("xorb_hash.txt"))
         .unwrap()
         .trim()
         .to_string();
 
-    let chunks = chunk_data(&csv_data);
-
-    // Compute chunk hashes and sizes
-    let chunk_hashes_and_sizes: Vec<(MerkleHash, usize)> = chunks
+    let chunk_hashes_and_sizes: Vec<(MerkleHash, u64)> = chunks
         .iter()
-        .map(|c| {
-            let chunk_bytes = &csv_data[c.offset..c.offset + c.length];
-            (compute_chunk_hash(chunk_bytes), c.length)
-        })
+        .map(|c| (c.hash, c.data.len() as u64))
         .collect();
 
     // Verify we have the right number of chunks
     assert_eq!(chunk_hashes_and_sizes.len(), ref_chunks.len());
 
-    // Xorb hash = merkle root of (chunk_hash, chunk_size) pairs
-    let xorb_hash = compute_merkle_root(&chunk_hashes_and_sizes);
-    assert_eq!(xorb_hash.to_hex(), expected_xorb_hash, "xorb hash mismatch");
+    // Xorb hash = aggregated merkle hash of (chunk_hash, chunk_size) pairs
+    let computed = xorb_hash(&chunk_hashes_and_sizes);
+    assert_eq!(computed.hex(), expected_xorb_hash, "xorb hash mismatch");
 }
 
 // ─── File Hash Test ──────────────────────────────────────────────────────────
 
 #[test]
 fn test_file_hash_matches_reference() {
-    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let (_, chunks) = chunk_reference_csv();
     let expected_file_hash = fs::read_to_string(test_data_path("file_hash.txt"))
         .unwrap()
         .trim()
         .to_string();
 
-    let chunks = chunk_data(&csv_data);
-
-    let chunk_hashes_and_sizes: Vec<(MerkleHash, usize)> = chunks
+    let chunk_hashes_and_sizes: Vec<(MerkleHash, u64)> = chunks
         .iter()
-        .map(|c| {
-            let chunk_bytes = &csv_data[c.offset..c.offset + c.length];
-            (compute_chunk_hash(chunk_bytes), c.length)
-        })
+        .map(|c| (c.hash, c.data.len() as u64))
         .collect();
 
-    let file_hash = compute_file_hash(&chunk_hashes_and_sizes);
-    assert_eq!(file_hash.to_hex(), expected_file_hash, "file hash mismatch");
+    let computed = file_hash(&chunk_hashes_and_sizes);
+    assert_eq!(computed.hex(), expected_file_hash, "file hash mismatch");
 }
 
 // ─── Verification/Range Hash Test ────────────────────────────────────────────
 
 #[test]
 fn test_verification_range_hash_matches_reference() {
-    let csv_data = fs::read(test_data_path("ev_data.csv")).unwrap();
+    let (_, chunks) = chunk_reference_csv();
     let expected_range_hash = fs::read_to_string(test_data_path("range_hash.txt"))
         .unwrap()
         .trim()
         .to_string();
 
-    let chunks = chunk_data(&csv_data);
+    let chunk_hashes: Vec<MerkleHash> = chunks.iter().map(|c| c.hash).collect();
 
-    let chunk_hashes: Vec<MerkleHash> = chunks
-        .iter()
-        .map(|c| {
-            let chunk_bytes = &csv_data[c.offset..c.offset + c.length];
-            compute_chunk_hash(chunk_bytes)
-        })
-        .collect();
-
-    // The range hash covers all 796 chunks (single term for entire file)
-    let range_hash = compute_verification_hash(&chunk_hashes);
+    // The range hash covers all chunks (single term for the entire file)
+    let range_hash = range_hash_from_chunks(&chunk_hashes);
     assert_eq!(
-        range_hash.to_hex(),
+        range_hash.hex(),
         expected_range_hash,
         "verification range hash mismatch"
     );
@@ -263,51 +252,69 @@ fn test_verification_range_hash_matches_reference() {
 fn test_xorb_deserialization() {
     let xorb_data = fs::read(test_data_path("reference.xorb")).unwrap();
     let ref_chunks = parse_chunks_file(&test_data_path("chunks.txt"));
+    let expected_xorb_hash = fs::read_to_string(test_data_path("xorb_hash.txt"))
+        .unwrap()
+        .trim()
+        .to_string();
 
-    let deserialized = xorb::deserialize_xorb(&xorb_data).unwrap();
+    // The reference xorb carries no parseable XorbObjectInfoV1 footer — its
+    // tail is an opaque 4-byte marker — so walk the chunk frames the way a
+    // footer-less server-side validation does: parse each header, decompress,
+    // recompute hashes, and stop at the first non-header position.
+    let mut chunk_hashes_and_sizes: Vec<(MerkleHash, u64)> = Vec::new();
+    let mut has_lz4 = false;
+    let mut pos = 0usize;
+
+    while pos + XORB_CHUNK_HEADER_LENGTH <= xorb_data.len() {
+        let header_bytes: [u8; XORB_CHUNK_HEADER_LENGTH] = xorb_data
+            [pos..pos + XORB_CHUNK_HEADER_LENGTH]
+            .try_into()
+            .unwrap();
+        let Ok(header) = parse_chunk_header(header_bytes) else {
+            break; // opaque tail
+        };
+
+        let scheme = header.get_compression_scheme().unwrap();
+        has_lz4 |= scheme == CompressionScheme::LZ4;
+
+        let data_start = pos + XORB_CHUNK_HEADER_LENGTH;
+        let data_end = data_start + header.get_compressed_length() as usize;
+        let data = scheme
+            .decompress_from_slice(&xorb_data[data_start..data_end])
+            .unwrap();
+        assert_eq!(data.len(), header.get_uncompressed_length() as usize);
+
+        chunk_hashes_and_sizes.push((compute_data_hash(&data), data.len() as u64));
+        pos = data_end;
+    }
 
     assert_eq!(
-        deserialized.len(),
+        chunk_hashes_and_sizes.len(),
         ref_chunks.len(),
-        "xorb chunk count mismatch: got {}, expected {}",
-        deserialized.len(),
-        ref_chunks.len()
+        "xorb chunk count mismatch"
     );
 
-    // Verify each chunk size matches and hash matches
-    for (i, (chunk, (expected_hash, expected_size))) in
-        deserialized.iter().zip(ref_chunks.iter()).enumerate()
+    // Verify each chunk hash and size against the reference list, and the
+    // aggregate against the reference xorb hash.
+    for (i, ((hash, size), (expected_hash, expected_size))) in chunk_hashes_and_sizes
+        .iter()
+        .zip(ref_chunks.iter())
+        .enumerate()
     {
+        assert_eq!(hash.hex(), *expected_hash, "xorb chunk {i} hash mismatch");
         assert_eq!(
-            chunk.data.len(),
-            *expected_size,
-            "xorb chunk {} size mismatch: got {}, expected {}",
-            i,
-            chunk.data.len(),
-            *expected_size
-        );
-
-        let hash = compute_chunk_hash(&chunk.data);
-        assert_eq!(
-            hash.to_hex(),
-            *expected_hash,
-            "xorb chunk {} hash mismatch",
-            i
+            *size as usize, *expected_size,
+            "xorb chunk {i} size mismatch"
         );
     }
+    assert_eq!(
+        xorb_hash(&chunk_hashes_and_sizes).hex(),
+        expected_xorb_hash,
+        "recomputed xorb hash mismatch"
+    );
 
-    // The interop claim "our frame-based LZ4 matches xet-core's" rests on this
+    // The interop claim "frame-based LZ4 matches xet-core's" rests on this
     // xet-core-produced xorb actually containing LZ4 chunks — pin that here.
-    let mut has_lz4 = false;
-    let mut pos = 0;
-    while pos + ChunkHeader::SIZE <= xorb_data.len() {
-        let header_bytes: [u8; 8] = xorb_data[pos..pos + ChunkHeader::SIZE].try_into().unwrap();
-        let Ok(header) = ChunkHeader::from_bytes(&header_bytes) else {
-            break; // CasObjectInfoV1 footer
-        };
-        has_lz4 |= header.compression_type == CompressionType::Lz4;
-        pos += ChunkHeader::SIZE + header.compressed_size as usize;
-    }
     assert!(
         has_lz4,
         "reference xorb contains no LZ4 chunks; LZ4 interop is not exercised"
@@ -319,17 +326,12 @@ fn test_xorb_deserialization() {
 #[test]
 fn test_shard_deserialization_no_footer() {
     let shard_data = fs::read(test_data_path("reference_shard_nofooter.bin")).unwrap();
-    let shard = Shard::from_bytes(&shard_data).unwrap();
+    let shard =
+        MDBMinimalShard::from_reader(&mut Cursor::new(&shard_data[..]), true, true).unwrap();
 
-    // This shard is for one file upload (no footer)
-    assert_eq!(shard.header.footer_size, 0);
-    assert!(shard.footer.is_none());
-
-    // Should have file info blocks
-    assert!(
-        !shard.file_info_blocks.is_empty(),
-        "expected at least one file info block"
-    );
+    // This shard is one file upload: file info + xorb info present
+    assert!(shard.num_files() > 0, "expected at least one file block");
+    assert!(shard.num_xorb() > 0, "expected at least one xorb block");
 
     // Verify the file hash matches our expected file
     let expected_file_hash = fs::read_to_string(test_data_path("file_hash.txt"))
@@ -337,62 +339,63 @@ fn test_shard_deserialization_no_footer() {
         .trim()
         .to_string();
     assert_eq!(
-        shard.file_info_blocks[0].header.file_hash.to_hex(),
+        shard.file(0).unwrap().file_hash().hex(),
         expected_file_hash,
         "shard file hash mismatch"
     );
 
-    // Should have CAS info blocks (xorb metadata)
-    assert!(
-        !shard.cas_info_blocks.is_empty(),
-        "expected at least one CAS info block"
-    );
-
-    // Verify xorb hash in CAS info matches
+    // Verify xorb hash in the xorb info matches
     let expected_xorb_hash = fs::read_to_string(test_data_path("xorb_hash.txt"))
         .unwrap()
         .trim()
         .to_string();
     assert_eq!(
-        shard.cas_info_blocks[0].header.cas_hash.to_hex(),
+        shard.xorb(0).unwrap().xorb_hash().hex(),
         expected_xorb_hash,
-        "shard CAS info xorb hash mismatch"
+        "shard xorb info hash mismatch"
     );
 }
 
 #[test]
 fn test_shard_deserialization_with_footer() {
     let shard_data = fs::read(test_data_path("reference_shard_full.bin")).unwrap();
-    let shard = Shard::from_bytes(&shard_data).unwrap();
+    let shard_info = MDBShardInfo::load_from_reader(&mut Cursor::new(&shard_data[..])).unwrap();
 
-    assert!(shard.header.footer_size > 0);
-    assert!(shard.footer.is_some());
+    assert!(shard_info.header.footer_size > 0);
+    assert!(shard_info.metadata.file_info_offset > 0);
+    assert!(shard_info.metadata.xorb_info_offset > shard_info.metadata.file_info_offset);
 
-    let footer = shard.footer.as_ref().unwrap();
-    assert!(footer.file_info_offset > 0);
-    assert!(footer.cas_info_offset > footer.file_info_offset);
+    // The file info section itself must hold our reference file (the footer's
+    // lookup-table counts may be zero in older-generation reference shards).
+    let mut reader = Cursor::new(&shard_data[..]);
+    let file_infos = shard_info.read_all_file_info_sections(&mut reader).unwrap();
+    let expected_file_hash = fs::read_to_string(test_data_path("file_hash.txt"))
+        .unwrap()
+        .trim()
+        .to_string();
+    assert!(
+        file_infos
+            .iter()
+            .any(|fi| fi.metadata.file_hash.hex() == expected_file_hash),
+        "reference file not found in shard file info section"
+    );
 }
 
 #[test]
 fn test_shard_deserialization_dedupe() {
     let shard_data = fs::read(test_data_path("reference_shard_dedupe.bin")).unwrap();
-    let shard = Shard::from_bytes(&shard_data).unwrap();
+    let mut reader = Cursor::new(&shard_data[..]);
+    let shard_info = MDBShardInfo::load_from_reader(&mut reader).unwrap();
 
-    // Dedupe shards have empty file info and CAS info with HMAC-protected hashes
+    // Dedupe shards carry an HMAC key and xorb info with keyed chunk hashes
     assert!(
-        shard.file_info_blocks.is_empty(),
-        "dedupe shard should have no file info blocks"
-    );
-    assert!(
-        !shard.cas_info_blocks.is_empty(),
-        "dedupe shard should have CAS info blocks"
-    );
-
-    // Should have footer with HMAC key
-    assert!(shard.footer.is_some());
-    let footer = shard.footer.as_ref().unwrap();
-    assert!(
-        footer.has_hmac_key(),
+        shard_info.chunk_hashes_protected(),
         "dedupe shard should have HMAC key set"
+    );
+
+    let xorb_blocks = shard_info.read_all_xorb_blocks_full(&mut reader).unwrap();
+    assert!(
+        !xorb_blocks.is_empty(),
+        "dedupe shard should have xorb info blocks"
     );
 }

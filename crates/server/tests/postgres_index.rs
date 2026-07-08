@@ -58,7 +58,7 @@ async fn postgres_upload_reconstruct_and_dedup() {
 
     // Global-dedup query: this reads the xorb layout from Postgres (not the
     // object store) to build the response, so a known chunk must resolve.
-    let chunk_hash = artifacts.chunk_hashes[0].to_hex();
+    let chunk_hash = artifacts.chunk_hashes[0].hex();
     let resp = server
         .client
         .get(format!(

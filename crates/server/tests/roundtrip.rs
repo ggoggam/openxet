@@ -1,7 +1,9 @@
 mod helpers;
 
 use openxet_cas_types::reconstruction::QueryReconstructionResponse;
-use openxet_cas_types::shard::{Shard, ShardHeader};
+use xet_core_structures::metadata_shard::MDBShardFileHeader;
+use xet_core_structures::metadata_shard::file_structs::FileDataSequenceHeader;
+use xet_core_structures::metadata_shard::xorb_structs::XorbChunkSequenceHeader;
 
 use helpers::{
     TestServer, build_upload_artifacts, download_via_protocol, generate_test_data, upload_artifacts,
@@ -242,14 +244,18 @@ async fn test_shard_rejects_nonzero_footer() {
     let server = TestServer::start().await;
     let token = server.write_token();
 
-    // Build a shard with footer_size != 0
-    let shard = Shard {
-        header: ShardHeader::new(64), // non-zero footer
-        file_info_blocks: vec![],
-        cas_info_blocks: vec![],
-        footer: None,
-    };
-    let shard_bytes = shard.to_bytes().unwrap();
+    // Build an otherwise-empty shard whose header declares footer_size != 0
+    // (MDBShardFileHeader::default() carries the real footer size).
+    let mut shard_bytes = Vec::new();
+    MDBShardFileHeader::default()
+        .serialize(&mut shard_bytes)
+        .unwrap();
+    FileDataSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .unwrap();
+    XorbChunkSequenceHeader::bookend()
+        .serialize(&mut shard_bytes)
+        .unwrap();
 
     let resp = server
         .client

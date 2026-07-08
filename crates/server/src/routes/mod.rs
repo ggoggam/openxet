@@ -2,6 +2,7 @@ mod dedup;
 mod reconstruction;
 mod shard;
 mod xorb;
+mod xorb_meta;
 
 use axum::Router;
 use axum::extract::DefaultBodyLimit;
@@ -13,10 +14,10 @@ use tower_http::trace::TraceLayer;
 
 use crate::state::AppState;
 
-// 1 MiB above MAX_XORB_SIZE/MAX_SHARD_SIZE so the handlers' own size checks
-// fire first and return 413 with a payload-specific message, not axum's
-// generic body-limit 413.
-const MAX_BODY_SIZE: usize = 65 * 1024 * 1024;
+// 1 MiB above the handlers' own payload caps (68 MiB for serialized xorbs,
+// 64 MiB for shards) so those checks fire first and return 413 with a
+// payload-specific message, not axum's generic body-limit 413.
+const MAX_BODY_SIZE: usize = 69 * 1024 * 1024;
 
 /// Replace any `token=…` value in a query string with a placeholder as a
 /// defensive measure so credentials never land in request logs.

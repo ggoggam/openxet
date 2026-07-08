@@ -8,9 +8,13 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-openxet-cas-types = { workspace = true }
-openxet-chunking = { workspace = true }
-openxet-hashing = { workspace = true }
-hmac = { workspace = true }
-sha2 = { workspace = true }
+xet-core-structures = { workspace = true }
+xet-data = { workspace = true }
+bytes = { workspace = true }
 wasm-bindgen = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+
+[package.metadata.cargo-machete]
+ignored = ["getrandom"]

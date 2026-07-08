@@ -1,6 +1,7 @@
-pub mod chunk;
-pub mod reconstruction;
-pub mod shard;
-pub mod xorb;
+//! Wire types for the Xet `/v1` HTTP API.
+//!
+//! The binary formats (xorbs, shards) and hashing live in HuggingFace's
+//! `xet-core-structures` / `xet-data` crates; this crate only carries the
+//! JSON types this server exchanges over HTTP.
 
-pub use openxet_hashing::MerkleHash;
+pub mod reconstruction;

@@ -2,16 +2,18 @@
 
 A Rust implementation of a [Xet Protocol](https://huggingface.co/docs/xet/en/index)-compatible Content Addressable Storage (CAS) server with a browser upload pipeline and web UI. OpenXet provides content-addressed data storage with chunk-level deduplication, following the Xet Protocol Specification v1.0.0. It speaks the same `/v1` wire protocol as HuggingFace's `xet-core` / `hf_xet`, so those clients work against it unmodified.
 
+The binary formats, hashing, and chunking come directly from HuggingFace's own [`xet-core`](https://github.com/huggingface/xet-core) crates (`xet-core-structures`, `xet-data`) — the same code real `hf_xet` clients run — so wire compatibility holds by construction. The crates are pinned exactly (they are published as packaging for `hf_xet`, without a semver promise); upgrades are validated by the reference-file and client-compat test suites.
+
 ## Overview
 
 OpenXet breaks files into content-defined chunks using a Gearhash CDC algorithm, hashes them with Blake3, and stores them in deduplicated xorb archives. Files are reconstructed by looking up chunk references stored in shard metadata. This enables efficient storage and transfer of large files with automatic deduplication at the chunk level.
 
 ### Key Features
 
-- **Content-Defined Chunking** -- Gearhash-based CDC (8--128 KiB chunks, 64 KiB target) for stable chunk boundaries across file revisions
+- **Content-Defined Chunking** -- Gearhash-based CDC (64 KiB target) via xet-core's own chunker, for stable chunk boundaries across file revisions
 - **Content-Addressed Storage** -- Blake3 keyed hashing with aggregated merkle trees for xorb and file identification
-- **Chunk-Level Deduplication** -- Global dedup via HMAC-protected chunk hash queries
-- **Binary Formats** -- Xorb (chunk archive) and Shard (file metadata) serialization with LZ4 frame compression
+- **Chunk-Level Deduplication** -- Global dedup via blake3-keyed-HMAC chunk hash queries, matching real xet-core clients
+- **Binary Formats** -- Xorb (chunk archive) and Shard (file metadata) serialization straight from `xet-core-structures`
 - **Web UI** -- React dashboard for browsing files, inspecting xorbs, uploading data, and querying tabular files with DuckDB WASM
 - **Docker Support** -- Multi-stage Dockerfile and Docker Compose for single-command deployment
 
@@ -114,14 +116,13 @@ cargo fmt --check  # Check formatting
 
 ## Architecture
 
-OpenXet is organized as a Cargo workspace with five crates:
+OpenXet is organized as a Cargo workspace with three crates on top of the
+pinned HuggingFace `xet-core` crates:
 
 ```
 openxet/
 ├── crates/
-│   ├── hashing/       # MerkleHash, Blake3 keyed hashing, aggregated merkle tree
-│   ├── chunking/      # Gearhash content-defined chunking (CDC)
-│   ├── cas_types/     # Xorb/Shard binary formats, chunk compression, reconstruction types
+│   ├── cas_types/     # /v1 HTTP wire types (reconstruction JSON)
 │   ├── server/        # HTTP server (axum) with auth and storage — the /v1 CAS protocol
 │   └── wasm/          # openxet-wasm: chunk/hash/pack pipeline compiled to WebAssembly
 ├── web/               # React frontend (TypeScript, Vite, TailwindCSS)
@@ -133,11 +134,11 @@ openxet/
 ### Crate Dependency Graph
 
 ```
-server / wasm
-  ├── cas_types
-  │     └── hashing
-  ├── chunking
-  └── hashing
+server ── cas_types
+   │
+   ├── xet-core-structures   (hashing, xorb + shard formats; pinned upstream)
+wasm ┤
+   └── xet-data              (Gearhash CDC chunker; pinned upstream)
 ```
 
 ### API
@@ -173,8 +174,8 @@ The web UI is a React SPA built with TypeScript, Vite, and TailwindCSS. It
 speaks only the Xet wire protocol, like any other client:
 
 - **Upload** -- files are chunked, hashed, and packed into xorbs *in the
-  browser* by `openxet-wasm` (the workspace's own chunking/hashing crates
-  compiled to WebAssembly), then POSTed to `/v1/xorbs` + `/v1/shards`
+  browser* by `openxet-wasm` (HuggingFace's xet-core crates compiled to
+  WebAssembly), then POSTed to `/v1/xorbs` + `/v1/shards`
 - **Files** -- a local catalog (browser localStorage) of files uploaded from
   this browser, plus "open by hash" for anything else; the CAS itself is
   content-addressed and has no listing endpoint by design
