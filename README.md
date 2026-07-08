@@ -40,23 +40,68 @@ cargo build
 mise run fe:build
 ```
 
-### Running
+### Running the dev server
+
+The server runs on the host in both flavors and serves the API + static
+frontend at `http://localhost:8080`. Pick a backend based on what you're doing:
 
 ```bash
-cargo run          # Run the server (serves API + static frontend on port 8080)
+mise run dev       # local:  filesystem storage — single-node local dev
+mise run dev:s3    # rustfs: S3 storage — for distributed / multi-replica setups
 ```
 
+**`dev` (local, filesystem)** — the default for everyday local work. Chunks and
+metadata are written under `OPENXET_DATA_DIR` on the local filesystem, and
+reconstruction serves xorb bytes directly from the server. No external services;
+nothing to bring up or tear down. State lives on your disk between runs.
+
+**`dev:s3` (rustfs, distributed)** — mirrors a production-shaped deployment.
+Xorbs live in an S3-compatible object store (RustFS) and reconstruction returns
+**presigned S3 URLs** so clients fetch bytes straight from object storage
+instead of through the server. Because the object store (and the Postgres index
+in the Docker variant) is shared, this is the layout that scales to multiple
+server replicas. The task auto-manages the storage services for you:
+
+- `depends = ["rustfs:up"]` brings up RustFS + Postgres via Docker before the
+  server starts.
+- `depends_post = ["rustfs:down"]` tears them back down when the server exits.
+
+> The S3 endpoint is `localhost:9000`, **not** `rustfs:9000`: the server runs on
+> the host, so the presigned URLs it mints must resolve from the host too. The
+> port-mapped RustFS makes `localhost:9000` reachable from both server and
+> client.
+
+Configuration is entirely env-driven. `mise run dev:s3` sets these for you; the
+same variables apply if you run the binary directly:
+
+| Variable | `dev` (local) | `dev:s3` (rustfs) |
+|----------|---------------|-------------------|
+| `OPENXET_STORAGE_BACKEND` | *(filesystem, default)* | `s3` |
+| `OPENXET_DATA_DIR` | local data dir | local data dir (shards/index) |
+| `OPENXET_S3_BUCKET` | — | `openxet` |
+| `OPENXET_S3_REGION` | — | `us-east-1` |
+| `OPENXET_S3_ENDPOINT` | — | `http://localhost:9000` |
+| `OPENXET_S3_ACCESS_KEY_ID` | — | `rustfsadmin` |
+| `OPENXET_S3_SECRET_ACCESS_KEY` | — | `rustfsadmin` |
+| `OPENXET_S3_ALLOW_HTTP` | — | `true` |
+
+For authentication, configure OIDC issuers (`OPENXET_OIDC_ISSUERS`); clients then
+present bearer tokens from that provider. Leave `OPENXET_AUTH_ENABLED=false`
+(the mise default) for local/dev use.
+
 ### Running with Docker
+
+The Docker Compose stacks run the server *inside* a container. The RustFS stack
+additionally wires in a Postgres index (`OPENXET_INDEX_BACKEND=postgres`) so the
+server can scale to multiple replicas behind a shared object store.
 
 ```bash
 # Local filesystem backend
 docker compose -f docker/compose.local.yaml up -d --build
 
-# S3-compatible backend via RustFS (S3 API on :9000, console on :9001)
-docker compose -f docker/compose.rustfs.yaml up -d --build
+# S3-compatible backend via RustFS (S3 API on :9000, console on :9001) + Postgres index
+docker compose -f docker/compose.rustfs.yaml up -d --build   # or: mise run up
 ```
-
-The server will be available at `http://localhost:8080`. For authentication, configure OIDC issuers (`auth.oidc_issuers`); clients then present bearer tokens from that provider. Leave `auth.enabled = false` for local/dev use.
 
 ### Testing
 
@@ -176,18 +221,72 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) for the full protocol speci
 
 ### Mise Tasks
 
-The project uses [mise](https://mise.jdx.dev/) for task automation:
+The project uses [mise](https://mise.jdx.dev/) for both toolchain management
+and task automation. `mise install` provisions everything except Rust itself
+(bun, uv, prek, wasm-pack, cargo-nextest — Rust comes from rustup). Run any task
+with `mise run <task>`; list them all with `mise tasks`. Tasks declaring
+`sources`/`outputs` are cached and skip re-running when inputs are unchanged.
+
+**Run**
+
+| Task (alias) | What it does |
+|------|--------------|
+| `dev` | Build server + frontend, run the server with the **filesystem** backend (local dev). |
+| `dev:s3` | Build server + frontend, bring up RustFS + Postgres, run the server against **S3** (presigned URLs); tears the services down on exit. |
+
+**Build**
+
+| Task | What it does |
+|------|--------------|
+| `build` | Build all crates (debug). |
+| `build:release` | Build all crates (release). |
+| `clean` | `cargo clean` — remove build artifacts. |
+
+**Test**
+
+| Task | What it does |
+|------|--------------|
+| `test` | Run all tests via `cargo nextest` (`RUST_BACKTRACE=1`). |
+| `test:unit` | Unit tests only (`--lib`). |
+| `test:integration` | Integration tests only (`--test '*'`). |
+
+**Lint & Format**
+
+| Task | What it does |
+|------|--------------|
+| `lint` | `cargo clippy -- -D warnings`. |
+| `fmt` | Format all Rust code (`cargo fmt --all`). |
+| `fmt:check` | Check formatting without writing. |
+| `check` | Aggregate gate: depends on `fmt:check`, `lint`, `test`. |
+| `pre-commit` | Run all pre-commit hooks via `prek` against every file. |
+
+**Frontend** (all run in `web/`)
+
+| Task | What it does |
+|------|--------------|
+| `fe:install` | Install frontend deps (`bun install`). |
+| `fe:wasm` | Build the `openxet-wasm` package used by the upload page (adds the `wasm32-unknown-unknown` target, runs `wasm-pack`). |
+| `fe:build` | Production frontend build (depends on `fe:install`, `fe:wasm`). |
+| `fe:dev` | Frontend dev server with HMR, proxies `/v1` to `localhost:8080` (depends on `fe:install`, `fe:wasm`). |
+| `fe:lint` | Lint frontend code (ESLint). |
+
+**Docker**
+
+| Task (alias) | What it does |
+|------|--------------|
+| `docker:up` (`up`) | Bring up the full Docker Compose stack (RustFS backend + Postgres + dockerized server). |
+| `docker:down` (`down`) | Bring the stack down. |
+| `docker:log` (`log`) | Tail the last 100 lines of compose logs. |
+| `rustfs:up` (`rustfs`) | Bring up **only** the storage services (RustFS + Postgres), for a host-run server — used as a dependency of `dev:s3`. |
+| `rustfs:down` | Bring the storage services down. |
+
+Typical loops:
 
 ```bash
-mise run build           # Build all crates (debug)
-mise run build:release   # Build all crates (release)
-mise run test            # Run all tests
-mise run lint            # Run clippy
-mise run check           # Format check + clippy + tests
-mise run dev             # Build everything and run the server
-mise run fe:build        # Build frontend (installs deps + compiles the wasm pipeline)
-mise run up              # Docker compose up (RustFS backend)
-mise run down            # Docker compose down
+mise run dev                       # backend on :8080 (filesystem)
+mise run fe:dev                    # frontend HMR, proxying /v1 → :8080
+mise run check                     # fmt + clippy + tests before pushing
+mise run dev:s3                    # exercise the S3 / presigned-URL path
 ```
 
 ### Code Conventions
