@@ -11,6 +11,10 @@ repository = "https://github.com/ggoggam/openxet"
 # HuggingFace xet-core crates. These are published as packaging for hf-xet
 # with no semver promise, so they are pinned exactly; upgrade deliberately
 # alongside hf_xet releases and re-run the compat test suite.
+#
+# NOTE: Cargo.lock pins the transitive `tracing-appender` at 0.2.4 (matching
+# xet-core's own lockfile) — 0.2.5 fails to compile for wasm32, which breaks
+# the openxet-wasm build. Re-pin after any `cargo update` that bumps it.
 xet-core-structures = "=1.5.2"
 xet-data = "=1.5.2"
 
