@@ -32,7 +32,7 @@ services:
       "
 
   postgres:
-    image: postgres:16-alpine
+    image: postgres:17-alpine
     ports:
       - "5432:5432"
     environment:
@@ -81,15 +81,7 @@ services:
       OPENXET_POSTGRES_URL: postgres://openxet:openxet@postgres:5432/openxet
     healthcheck:
       # /v1/shards answers 405 to GET; any HTTP response means the server is up
-      test:
-        [
-          "CMD",
-          "curl",
-          "-s",
-          "-o",
-          "/dev/null",
-          "http://localhost:8080/v1/shards",
-        ]
+      test: ["CMD", "curl", "-s", "-o", "/dev/null", "http://localhost:8080/v1/shards"]
       interval: 10s
       timeout: 5s
       retries: 3
