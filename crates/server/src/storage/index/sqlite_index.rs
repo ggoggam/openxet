@@ -1,4 +1,8 @@
-use sqlx::PgPool;
+use std::path::Path;
+use std::time::Duration;
+
+use sqlx::SqlitePool;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 use super::super::backend::validate_hash;
 use super::super::error::StorageError;
@@ -7,49 +11,69 @@ use super::{
     UsageReport, XorbLayout, XorbSummary,
 };
 
-fn pg_err(e: sqlx::Error) -> StorageError {
+fn sq_err(e: sqlx::Error) -> StorageError {
     StorageError::Index(e.to_string())
 }
 
-/// Bring the index schema up to date by running the embedded migrations
-/// (compiled in from `crates/server/migrations/postgres/`).
+/// Rows per INSERT statement in `put_batch`: 3 bind parameters each, kept
+/// well under SQLite's 32766-parameter statement limit.
+const INSERT_BATCH_ROWS: usize = 4096;
+
+/// Open (creating if needed) the node-local index database at
+/// `{data_dir}/index/index.sqlite` and bring its schema up to date by running
+/// the embedded migrations (compiled in from `crates/server/migrations/sqlite/`).
 ///
-/// Both indexes are pure materialized views of uploaded shards, so a shared
-/// Postgres schema lets every server replica see the same dedup and
-/// reconstruction state — which a node-local SQLite file cannot. The migrator
-/// takes a Postgres advisory lock, so concurrently starting replicas do not
-/// race.
-pub async fn init_schema(pool: &PgPool) -> Result<(), StorageError> {
-    sqlx::migrate!("./migrations/postgres")
-        .run(pool)
+/// WAL keeps readers unblocked during writes, and the busy timeout serializes
+/// the pool's writers instead of surfacing `SQLITE_BUSY` errors.
+pub async fn connect(data_dir: &Path) -> Result<SqlitePool, StorageError> {
+    let index_dir = data_dir.join("index");
+    std::fs::create_dir_all(&index_dir).map_err(|e| StorageError::io(e, &index_dir))?;
+
+    let options = SqliteConnectOptions::new()
+        .filename(index_dir.join("index.sqlite"))
+        .create_if_missing(true)
+        .journal_mode(SqliteJournalMode::Wal)
+        .synchronous(SqliteSynchronous::Normal)
+        .busy_timeout(Duration::from_secs(5));
+    let pool = SqlitePoolOptions::new()
+        .connect_with(options)
         .await
-        .map_err(|e| StorageError::Index(e.to_string()))
+        .map_err(sq_err)?;
+
+    sqlx::migrate!("./migrations/sqlite")
+        .run(&pool)
+        .await
+        .map_err(|e| StorageError::Index(e.to_string()))?;
+
+    Ok(pool)
 }
 
-/// Postgres-backed chunk index: `chunk_hash → Vec<ChunkLocation>`.
+/// SQLite-backed chunk index: `chunk_hash → Vec<ChunkLocation>`.
 ///
-/// A shared alternative to [`super::SqliteChunkIndex`] for multi-replica
-/// deployments, where every instance must observe the same global dedup state.
-pub struct PostgresChunkIndex {
-    pool: PgPool,
+/// The node-local default, for single-instance deployments; use
+/// [`super::PostgresChunkIndex`] when replicas must share one dedup state.
+pub struct SqliteChunkIndex {
+    pool: SqlitePool,
 }
 
-impl PostgresChunkIndex {
-    pub fn new(pool: PgPool) -> Self {
+impl SqliteChunkIndex {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
 
-impl ChunkIndex for PostgresChunkIndex {
+impl ChunkIndex for SqliteChunkIndex {
     async fn get(&self, chunk_hash: &str) -> Result<Vec<ChunkLocation>, StorageError> {
         validate_hash(chunk_hash)?;
+        // rowid stands in for the Postgres schema's `seq`: it preserves
+        // insertion order across locations for the same chunk.
         let rows: Vec<(String, i64)> = sqlx::query_as(
-            "SELECT xorb_hash, chunk_idx FROM chunk_index WHERE chunk_hash = $1 ORDER BY seq",
+            "SELECT xorb_hash, chunk_idx FROM chunk_index WHERE chunk_hash = $1 ORDER BY rowid",
         )
         .bind(chunk_hash)
         .fetch_all(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
 
         Ok(rows
             .into_iter()
@@ -65,40 +89,34 @@ impl ChunkIndex for PostgresChunkIndex {
             .await
     }
 
-    /// Insert many `chunk_hash → location` entries in a single statement. The
+    /// Insert many `chunk_hash → location` entries in one transaction. The
     /// composite primary key makes `ON CONFLICT DO NOTHING` the dedup path.
     ///
-    /// Columns are passed as parallel arrays and expanded with `UNNEST`, so a
-    /// ~1000-chunk xorb is one round-trip to Postgres rather than one INSERT per
-    /// chunk — the difference between a fast upload and a very slow one.
+    /// SQLite has no `UNNEST`, so rows go in as multi-row `VALUES` statements,
+    /// chunked to respect the bind-parameter limit — still a single commit for
+    /// a ~1000-chunk xorb rather than one fsync per chunk.
     async fn put_batch(&self, entries: Vec<(String, ChunkLocation)>) -> Result<(), StorageError> {
         if entries.is_empty() {
             return Ok(());
         }
-
-        let mut chunk_hashes = Vec::with_capacity(entries.len());
-        let mut xorb_hashes = Vec::with_capacity(entries.len());
-        let mut chunk_idxs = Vec::with_capacity(entries.len());
-        for (chunk_hash, location) in entries {
-            validate_hash(&chunk_hash)?;
-            chunk_hashes.push(chunk_hash);
-            xorb_hashes.push(location.xorb_hash);
-            chunk_idxs.push(location.chunk_index as i64);
+        for (chunk_hash, _) in &entries {
+            validate_hash(chunk_hash)?;
         }
 
-        sqlx::query(
-            "INSERT INTO chunk_index (chunk_hash, xorb_hash, chunk_idx) \
-             SELECT * FROM UNNEST($1::text[], $2::text[], $3::bigint[]) \
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(&chunk_hashes)
-        .bind(&xorb_hashes)
-        .bind(&chunk_idxs)
-        .execute(&self.pool)
-        .await
-        .map_err(pg_err)?;
-
-        Ok(())
+        let mut tx = self.pool.begin().await.map_err(sq_err)?;
+        for batch in entries.chunks(INSERT_BATCH_ROWS) {
+            let mut qb = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+                "INSERT INTO chunk_index (chunk_hash, xorb_hash, chunk_idx) ",
+            );
+            qb.push_values(batch, |mut row, (chunk_hash, location)| {
+                row.push_bind(chunk_hash)
+                    .push_bind(&location.xorb_hash)
+                    .push_bind(location.chunk_index as i64);
+            });
+            qb.push(" ON CONFLICT DO NOTHING");
+            qb.build().execute(&mut *tx).await.map_err(sq_err)?;
+        }
+        tx.commit().await.map_err(sq_err)
     }
 
     async fn get_xorb_layout(&self, xorb_hash: &str) -> Result<Option<XorbLayout>, StorageError> {
@@ -108,7 +126,7 @@ impl ChunkIndex for PostgresChunkIndex {
                 .bind(xorb_hash)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(pg_err)?;
+                .map_err(sq_err)?;
         match json {
             Some(json) => serde_json::from_str(&json)
                 .map(Some)
@@ -133,24 +151,24 @@ impl ChunkIndex for PostgresChunkIndex {
         .bind(&json)
         .execute(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
         Ok(())
     }
 
     async fn remove_xorb(&self, xorb_hash: &str) -> Result<(), StorageError> {
         validate_hash(xorb_hash)?;
-        let mut tx = self.pool.begin().await.map_err(pg_err)?;
+        let mut tx = self.pool.begin().await.map_err(sq_err)?;
         sqlx::query("DELETE FROM chunk_index WHERE xorb_hash = $1")
             .bind(xorb_hash)
             .execute(&mut *tx)
             .await
-            .map_err(pg_err)?;
+            .map_err(sq_err)?;
         sqlx::query("DELETE FROM xorb_layout WHERE xorb_hash = $1")
             .bind(xorb_hash)
             .execute(&mut *tx)
             .await
-            .map_err(pg_err)?;
-        tx.commit().await.map_err(pg_err)
+            .map_err(sq_err)?;
+        tx.commit().await.map_err(sq_err)
     }
 
     async fn list_xorb_summaries(
@@ -160,14 +178,14 @@ impl ChunkIndex for PostgresChunkIndex {
     ) -> Result<Vec<XorbSummary>, StorageError> {
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT xorb_hash, layout FROM xorb_layout \
-             WHERE ($1::text IS NULL OR xorb_hash > $1) \
+             WHERE ($1 IS NULL OR xorb_hash > $1) \
              ORDER BY xorb_hash LIMIT $2",
         )
         .bind(after)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
 
         rows.into_iter()
             .map(|(xorb_hash, layout_json)| {
@@ -183,18 +201,18 @@ impl ChunkIndex for PostgresChunkIndex {
     }
 }
 
-/// Postgres-backed file index: `file_hash → shard_hash`.
-pub struct PostgresFileIndex {
-    pool: PgPool,
+/// SQLite-backed file index: `file_hash → shard_hash`.
+pub struct SqliteFileIndex {
+    pool: SqlitePool,
 }
 
-impl PostgresFileIndex {
-    pub fn new(pool: PgPool) -> Self {
+impl SqliteFileIndex {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
 
-impl FileIndex for PostgresFileIndex {
+impl FileIndex for SqliteFileIndex {
     async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
         validate_hash(file_hash)?;
         let shard_hash: Option<String> =
@@ -202,7 +220,7 @@ impl FileIndex for PostgresFileIndex {
                 .bind(file_hash)
                 .fetch_optional(&self.pool)
                 .await
-                .map_err(pg_err)?;
+                .map_err(sq_err)?;
         Ok(shard_hash)
     }
 
@@ -217,7 +235,7 @@ impl FileIndex for PostgresFileIndex {
         .bind(shard_hash)
         .execute(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
         Ok(())
     }
 
@@ -226,24 +244,24 @@ impl FileIndex for PostgresFileIndex {
             sqlx::query_as("SELECT file_hash, shard_hash FROM file_index")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(pg_err)?;
+                .map_err(sq_err)?;
         Ok(rows)
     }
 
     async fn remove(&self, file_hash: &str) -> Result<(), StorageError> {
         validate_hash(file_hash)?;
-        let mut tx = self.pool.begin().await.map_err(pg_err)?;
+        let mut tx = self.pool.begin().await.map_err(sq_err)?;
         sqlx::query("DELETE FROM file_ownership WHERE file_hash = $1")
             .bind(file_hash)
             .execute(&mut *tx)
             .await
-            .map_err(pg_err)?;
+            .map_err(sq_err)?;
         sqlx::query("DELETE FROM file_index WHERE file_hash = $1")
             .bind(file_hash)
             .execute(&mut *tx)
             .await
-            .map_err(pg_err)?;
-        tx.commit().await.map_err(pg_err)
+            .map_err(sq_err)?;
+        tx.commit().await.map_err(sq_err)
     }
 
     async fn claim(
@@ -266,7 +284,7 @@ impl FileIndex for PostgresFileIndex {
         .bind(claim.created_at_unix)
         .execute(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
         Ok(())
     }
 
@@ -278,7 +296,7 @@ impl FileIndex for PostgresFileIndex {
                 .bind(owner)
                 .execute(&self.pool)
                 .await
-                .map_err(pg_err)?;
+                .map_err(sq_err)?;
         Ok(result.rows_affected() > 0)
     }
 
@@ -291,7 +309,7 @@ impl FileIndex for PostgresFileIndex {
         .bind(file_hash)
         .fetch_all(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
         Ok(rows
             .into_iter()
             .map(|(owner, logical_bytes, created_at_unix)| OwnerClaim {
@@ -313,10 +331,10 @@ impl FileIndex for PostgresFileIndex {
         let rows: Vec<(String, String, i64)> = match owner {
             None => sqlx::query_as(
                 "SELECT f.file_hash, f.shard_hash, \
-                            COALESCE(MAX(o.logical_bytes), 0)::BIGINT \
+                            COALESCE(MAX(o.logical_bytes), 0) \
                      FROM file_index f \
                      LEFT JOIN file_ownership o ON o.file_hash = f.file_hash \
-                     WHERE ($1::text IS NULL OR f.file_hash > $1) \
+                     WHERE ($1 IS NULL OR f.file_hash > $1) \
                      GROUP BY f.file_hash, f.shard_hash \
                      ORDER BY f.file_hash \
                      LIMIT $2",
@@ -325,12 +343,12 @@ impl FileIndex for PostgresFileIndex {
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(pg_err)?,
+            .map_err(sq_err)?,
             Some(owner) => sqlx::query_as(
                 "SELECT o.file_hash, f.shard_hash, o.logical_bytes \
                      FROM file_ownership o \
                      JOIN file_index f ON f.file_hash = o.file_hash \
-                     WHERE o.owner_id = $1 AND ($2::text IS NULL OR o.file_hash > $2) \
+                     WHERE o.owner_id = $1 AND ($2 IS NULL OR o.file_hash > $2) \
                      ORDER BY o.file_hash \
                      LIMIT $3",
             )
@@ -339,7 +357,7 @@ impl FileIndex for PostgresFileIndex {
             .bind(limit as i64)
             .fetch_all(&self.pool)
             .await
-            .map_err(pg_err)?,
+            .map_err(sq_err)?,
         };
         Ok(rows
             .into_iter()
@@ -353,23 +371,23 @@ impl FileIndex for PostgresFileIndex {
 
     async fn usage(&self) -> Result<UsageReport, StorageError> {
         let owner_rows: Vec<(String, i64, i64)> = sqlx::query_as(
-            "SELECT owner_id, COUNT(*), COALESCE(SUM(logical_bytes), 0)::BIGINT \
+            "SELECT owner_id, COUNT(*), COALESCE(SUM(logical_bytes), 0) \
              FROM file_ownership GROUP BY owner_id ORDER BY owner_id",
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
 
         // Count each distinct file once; claims agree on the size (it is
         // derived from the file's content), so any row's value works.
         let totals: Option<(i64, i64)> = sqlx::query_as(
-            "SELECT COUNT(*), COALESCE(SUM(logical_bytes), 0)::BIGINT \
+            "SELECT COUNT(*), COALESCE(SUM(logical_bytes), 0) \
              FROM (SELECT file_hash, MAX(logical_bytes) AS logical_bytes \
                    FROM file_ownership GROUP BY file_hash) AS per_file",
         )
         .fetch_optional(&self.pool)
         .await
-        .map_err(pg_err)?;
+        .map_err(sq_err)?;
         let (claimed_files, unique_file_bytes) = totals.unwrap_or((0, 0));
 
         Ok(UsageReport {
@@ -384,5 +402,87 @@ impl FileIndex for PostgresFileIndex {
             claimed_files: claimed_files as u64,
             unique_file_bytes: unique_file_bytes as u64,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const CHUNK_HASH: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const HASH_A: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    const HASH_B: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+    fn loc(xorb: &str, i: u32) -> ChunkLocation {
+        ChunkLocation {
+            xorb_hash: xorb.to_string(),
+            chunk_index: i,
+        }
+    }
+
+    #[tokio::test]
+    async fn chunk_roundtrip_and_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SqliteChunkIndex::new(connect(dir.path()).await.unwrap());
+
+        assert!(index.get(CHUNK_HASH).await.unwrap().is_empty());
+
+        index.put(CHUNK_HASH, loc(HASH_A, 0)).await.unwrap();
+        index.put(CHUNK_HASH, loc(HASH_A, 0)).await.unwrap(); // duplicate: no-op
+        index.put(CHUNK_HASH, loc(HASH_B, 3)).await.unwrap();
+
+        // rowid ordering: locations come back in insertion order.
+        let locations = index.get(CHUNK_HASH).await.unwrap();
+        assert_eq!(locations, vec![loc(HASH_A, 0), loc(HASH_B, 3)]);
+    }
+
+    #[tokio::test]
+    async fn chunk_put_batch() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SqliteChunkIndex::new(connect(dir.path()).await.unwrap());
+
+        index
+            .put_batch(vec![
+                (CHUNK_HASH.to_string(), loc(HASH_A, 0)),
+                (HASH_B.to_string(), loc(HASH_A, 1)),
+            ])
+            .await
+            .unwrap();
+
+        assert_eq!(index.get(CHUNK_HASH).await.unwrap(), vec![loc(HASH_A, 0)]);
+        assert_eq!(index.get(HASH_B).await.unwrap(), vec![loc(HASH_A, 1)]);
+    }
+
+    #[tokio::test]
+    async fn chunk_rejects_bad_hash() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SqliteChunkIndex::new(connect(dir.path()).await.unwrap());
+        assert!(index.put("bad", loc(HASH_A, 0)).await.is_err());
+        assert!(index.get("bad").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn file_roundtrip_overwrite_and_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = SqliteFileIndex::new(connect(dir.path()).await.unwrap());
+
+        assert!(index.get(HASH_A).await.unwrap().is_none());
+
+        index.put(HASH_A, HASH_B).await.unwrap();
+        assert_eq!(index.get(HASH_A).await.unwrap().as_deref(), Some(HASH_B));
+
+        index.put(HASH_A, CHUNK_HASH).await.unwrap(); // overwrite
+        assert_eq!(
+            index.get(HASH_A).await.unwrap().as_deref(),
+            Some(CHUNK_HASH)
+        );
+
+        assert_eq!(
+            index.list_all().await.unwrap(),
+            vec![(HASH_A.to_string(), CHUNK_HASH.to_string())]
+        );
+
+        assert!(index.put("bad", HASH_A).await.is_err());
+        assert!(index.put(HASH_A, "bad").await.is_err());
     }
 }

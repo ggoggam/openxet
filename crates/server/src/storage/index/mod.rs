@@ -1,5 +1,5 @@
 pub mod postgres_index;
-pub mod rocksdb_index;
+pub mod sqlite_index;
 
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
@@ -10,7 +10,7 @@ use crate::config::StorageConfig;
 use super::error::StorageError;
 
 pub use postgres_index::{PostgresChunkIndex, PostgresFileIndex};
-pub use rocksdb_index::{RocksDbChunkIndex, RocksDbFileIndex};
+pub use sqlite_index::{SqliteChunkIndex, SqliteFileIndex};
 
 /// A location where a chunk can be found: which xorb and at what index within it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,28 +244,28 @@ pub trait ChunkIndex: Send + Sync {
 /// `dyn`-compatible, so we dispatch over a closed set of backends with an enum
 /// rather than `Arc<dyn FileIndex>`.
 pub enum FileIndexBackend {
-    RocksDb(RocksDbFileIndex),
+    Sqlite(SqliteFileIndex),
     Postgres(PostgresFileIndex),
 }
 
 impl FileIndex for FileIndexBackend {
     async fn get(&self, file_hash: &str) -> Result<Option<String>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.get(file_hash).await,
+            Self::Sqlite(i) => i.get(file_hash).await,
             Self::Postgres(i) => i.get(file_hash).await,
         }
     }
 
     async fn put(&self, file_hash: &str, shard_hash: &str) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.put(file_hash, shard_hash).await,
+            Self::Sqlite(i) => i.put(file_hash, shard_hash).await,
             Self::Postgres(i) => i.put(file_hash, shard_hash).await,
         }
     }
 
     async fn list_all(&self) -> Result<Vec<(String, String)>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.list_all().await,
+            Self::Sqlite(i) => i.list_all().await,
             Self::Postgres(i) => i.list_all().await,
         }
     }
@@ -277,14 +277,14 @@ impl FileIndex for FileIndexBackend {
         limit: usize,
     ) -> Result<Vec<FileListEntry>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.list_files(after, owner, limit).await,
+            Self::Sqlite(i) => i.list_files(after, owner, limit).await,
             Self::Postgres(i) => i.list_files(after, owner, limit).await,
         }
     }
 
     async fn remove(&self, file_hash: &str) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.remove(file_hash).await,
+            Self::Sqlite(i) => i.remove(file_hash).await,
             Self::Postgres(i) => i.remove(file_hash).await,
         }
     }
@@ -296,28 +296,28 @@ impl FileIndex for FileIndexBackend {
         claim: OwnershipClaim,
     ) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.claim(owner, file_hash, claim).await,
+            Self::Sqlite(i) => i.claim(owner, file_hash, claim).await,
             Self::Postgres(i) => i.claim(owner, file_hash, claim).await,
         }
     }
 
     async fn release(&self, owner: &str, file_hash: &str) -> Result<bool, StorageError> {
         match self {
-            Self::RocksDb(i) => i.release(owner, file_hash).await,
+            Self::Sqlite(i) => i.release(owner, file_hash).await,
             Self::Postgres(i) => i.release(owner, file_hash).await,
         }
     }
 
     async fn file_claims(&self, file_hash: &str) -> Result<Vec<OwnerClaim>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.file_claims(file_hash).await,
+            Self::Sqlite(i) => i.file_claims(file_hash).await,
             Self::Postgres(i) => i.file_claims(file_hash).await,
         }
     }
 
     async fn usage(&self) -> Result<UsageReport, StorageError> {
         match self {
-            Self::RocksDb(i) => i.usage().await,
+            Self::Sqlite(i) => i.usage().await,
             Self::Postgres(i) => i.usage().await,
         }
     }
@@ -326,35 +326,35 @@ impl FileIndex for FileIndexBackend {
 /// A [`ChunkIndex`] selected at startup from configuration. See
 /// [`FileIndexBackend`] for why this is an enum rather than a trait object.
 pub enum ChunkIndexBackend {
-    RocksDb(RocksDbChunkIndex),
+    Sqlite(SqliteChunkIndex),
     Postgres(PostgresChunkIndex),
 }
 
 impl ChunkIndex for ChunkIndexBackend {
     async fn get(&self, chunk_hash: &str) -> Result<Vec<ChunkLocation>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.get(chunk_hash).await,
+            Self::Sqlite(i) => i.get(chunk_hash).await,
             Self::Postgres(i) => i.get(chunk_hash).await,
         }
     }
 
     async fn put(&self, chunk_hash: &str, location: ChunkLocation) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.put(chunk_hash, location).await,
+            Self::Sqlite(i) => i.put(chunk_hash, location).await,
             Self::Postgres(i) => i.put(chunk_hash, location).await,
         }
     }
 
     async fn put_batch(&self, entries: Vec<(String, ChunkLocation)>) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.put_batch(entries).await,
+            Self::Sqlite(i) => i.put_batch(entries).await,
             Self::Postgres(i) => i.put_batch(entries).await,
         }
     }
 
     async fn get_xorb_layout(&self, xorb_hash: &str) -> Result<Option<XorbLayout>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.get_xorb_layout(xorb_hash).await,
+            Self::Sqlite(i) => i.get_xorb_layout(xorb_hash).await,
             Self::Postgres(i) => i.get_xorb_layout(xorb_hash).await,
         }
     }
@@ -365,14 +365,14 @@ impl ChunkIndex for ChunkIndexBackend {
         layout: XorbLayout,
     ) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.put_xorb_layout(xorb_hash, layout).await,
+            Self::Sqlite(i) => i.put_xorb_layout(xorb_hash, layout).await,
             Self::Postgres(i) => i.put_xorb_layout(xorb_hash, layout).await,
         }
     }
 
     async fn remove_xorb(&self, xorb_hash: &str) -> Result<(), StorageError> {
         match self {
-            Self::RocksDb(i) => i.remove_xorb(xorb_hash).await,
+            Self::Sqlite(i) => i.remove_xorb(xorb_hash).await,
             Self::Postgres(i) => i.remove_xorb(xorb_hash).await,
         }
     }
@@ -383,7 +383,7 @@ impl ChunkIndex for ChunkIndexBackend {
         limit: usize,
     ) -> Result<Vec<XorbSummary>, StorageError> {
         match self {
-            Self::RocksDb(i) => i.list_xorb_summaries(after, limit).await,
+            Self::Sqlite(i) => i.list_xorb_summaries(after, limit).await,
             Self::Postgres(i) => i.list_xorb_summaries(after, limit).await,
         }
     }
@@ -391,23 +391,28 @@ impl ChunkIndex for ChunkIndexBackend {
 
 /// Build the file and chunk indexes from configuration.
 ///
-/// `rocksdb` (the default) keeps a node-local index and is fine for a single
+/// `sqlite` (the default) keeps a node-local index and is fine for a single
 /// instance; `postgres` shares one index across replicas so dedup and
 /// reconstruction stay consistent when the server is scaled out. Both indexes
-/// share a single `PgPool` on the Postgres path.
+/// share a single pool on either path.
 pub async fn build_index(
     config: &StorageConfig,
 ) -> anyhow::Result<(FileIndexBackend, ChunkIndexBackend)> {
     match config.index_backend.as_str() {
-        "rocksdb" => {
-            let data_dir = &config.data_dir;
-            let file = RocksDbFileIndex::new(data_dir)?;
-            let chunk = RocksDbChunkIndex::new(data_dir)?;
+        "sqlite" => {
+            let pool = sqlite_index::connect(&config.data_dir).await?;
             Ok((
-                FileIndexBackend::RocksDb(file),
-                ChunkIndexBackend::RocksDb(chunk),
+                FileIndexBackend::Sqlite(SqliteFileIndex::new(pool.clone())),
+                ChunkIndexBackend::Sqlite(SqliteChunkIndex::new(pool)),
             ))
         }
+        "rocksdb" => bail!(
+            "the `rocksdb` index backend was removed in favor of `sqlite`; \
+             existing RocksDB data under {}/index is not migrated — set \
+             index_backend to `sqlite` (node-local) or `postgres` and \
+             re-upload, or restore from shards",
+            config.data_dir.display()
+        ),
         "postgres" => {
             let url = config
                 .postgres_url
