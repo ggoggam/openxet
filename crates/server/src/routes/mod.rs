@@ -51,6 +51,12 @@ pub fn build_router(state: AppState) -> Router {
             "/v1/reconstructions/{file_id}",
             get(reconstruction::get_reconstruction),
         )
+        // xet-core prefers the V2 reconstruction API and falls back to V1 on
+        // 404/501, caching whichever version answered.
+        .route(
+            "/v2/reconstructions/{file_id}",
+            get(reconstruction::get_reconstruction_v2),
+        )
         .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup))
         // Management/lifecycle endpoints (not part of the Xet wire protocol):
         // list and inspect files, release a file, collect garbage, inspect usage.

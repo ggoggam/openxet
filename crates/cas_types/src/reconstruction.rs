@@ -64,3 +64,41 @@ pub struct QueryReconstructionResponse {
     /// Map from xorb hash to fetch info entries.
     pub fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>>,
 }
+
+/// A single byte range within a xorb, mapping chunk indices to physical bytes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XorbRangeDescriptor {
+    /// Chunk index range within the xorb (end-exclusive).
+    pub chunks: ChunkRange,
+    /// Physical byte range for the HTTP Range header (both inclusive).
+    pub bytes: ByteRange,
+}
+
+/// One fetchable URL covering a subset of a xorb's byte ranges.
+///
+/// xet-core issues a single GET per entry, sending every range in `ranges` in
+/// one `Range` header. An entry with multiple ranges therefore requires the
+/// URL target to answer with `multipart/byteranges`; entries with exactly one
+/// range take the ordinary single-range 206 path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct XorbMultiRangeFetch {
+    /// Self-authenticating URL for downloading the xorb data.
+    pub url: String,
+    /// Byte ranges covered by this URL, sorted by chunk start.
+    pub ranges: Vec<XorbRangeDescriptor>,
+}
+
+/// V2 reconstruction response returned by `GET /v2/reconstructions/{file_id}`.
+///
+/// Same terms as V1, but fetch info is keyed per xorb as a list of
+/// [`XorbMultiRangeFetch`] entries instead of per-range presigned URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueryReconstructionResponseV2 {
+    /// Byte offset into the first term's decoded data to skip.
+    pub offset_into_first_range: u64,
+    /// Ordered list of reconstruction terms.
+    pub terms: Vec<CASReconstructionTerm>,
+    /// Map from xorb hash to fetch entries. Every term's chunk range must fall
+    /// entirely within one entry's ranges.
+    pub xorbs: HashMap<String, Vec<XorbMultiRangeFetch>>,
+}

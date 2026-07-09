@@ -148,6 +148,7 @@ wasm ┤
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/v1/reconstructions/{file_id}` | File reconstruction (supports Range header) |
+| `GET` | `/v2/reconstructions/{file_id}` | V2 file reconstruction — per-xorb fetch entries; preferred by current xet-core clients |
 | `GET` | `/v1/chunks/default-merkledb/{hash}` | Global chunk deduplication query |
 | `GET` | `/v1/xorbs/default/{hash}` | Download a xorb |
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |

@@ -25,7 +25,7 @@ File → [Chunk, Chunk, ...] → [Xorb, Xorb, ...] → Shard
 
 ## 3. CAS API Specification
 
-Base URL: `{server_address}/v1`
+Base URL: `{server_address}/v1` (the reconstruction endpoint also has a `/v2` variant, see §3.2)
 
 ### 3.1 GET /v1/reconstructions/{file_id}
 
@@ -69,7 +69,64 @@ Retrieve file reconstruction metadata for downloading a file.
 - For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own public `/v1/xorbs/default/{hash}` route. Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
 - For range requests: compute which terms/chunks overlap the requested byte range, set `offset_into_first_range` accordingly, trim terms
 
-### 3.2 GET /v1/chunks/default-merkledb/{hash}
+### 3.2 GET /v2/reconstructions/{file_id}
+
+V2 variant of the reconstruction endpoint. xet-core clients (≥ the version
+that shipped the V2 protocol) try V2 first, fall back to V1 on 404/501, and
+cache whichever version answered — so serving V2 removes one probe round-trip
+per client session and matches the current upstream protocol.
+
+Path params, headers (including `Range`), and error responses are identical to
+§3.1. Only the response body differs: fetch information is grouped per xorb as
+a list of fetch entries instead of per-range presigned URL records.
+
+**Response (200):** `application/json`
+```json
+{
+  "offset_into_first_range": <number>,
+  "terms": [
+    {
+      "hash": "<xorb_hash_hex_64>",
+      "unpacked_length": <number>,
+      "range": { "start": <number>, "end": <number> }
+    }
+  ],
+  "xorbs": {
+    "<xorb_hash>": [
+      {
+        "url": "<presigned_url>",
+        "ranges": [
+          {
+            "chunks": { "start": <number>, "end": <number> },
+            "bytes": { "start": <number>, "end": <number> }
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
+- `terms` and `offset_into_first_range` are exactly as in V1.
+- `xorbs` maps each referenced xorb hash to fetch entries. The client issues
+  one GET per entry, sending **all** of that entry's `bytes` ranges in a single
+  `Range` header (`bytes=s1-e1,s2-e2,...` when there is more than one). Every
+  term's chunk range must fall entirely within one entry's `ranges`.
+- `chunks` is the chunk-index range (end-exclusive) the entry's bytes decode
+  to; `bytes` is the physical byte range (end-inclusive, HTTP Range format).
+
+**Implementation notes:**
+- openxet emits one single-range entry per merged chunk range. A multi-range
+  entry would make the client send a multi-range `Range` header, which
+  requires a `multipart/byteranges` response — S3-style presigned URLs and the
+  `/v1/xorbs` fallback route only answer single-range requests. Single-range
+  entries are the exact shape xet-core's own V1→V2 conversion produces, so
+  clients handle them on the ordinary 206 path.
+- When a file references the same xorb from multiple terms (deduplicated
+  content), the terms' chunk ranges are merged per xorb (overlapping/adjacent
+  ranges collapse) and each surviving range becomes its own fetch entry.
+
+### 3.3 GET /v1/chunks/default-merkledb/{hash}
 
 Query global chunk deduplication.
 
@@ -89,7 +146,7 @@ Query global chunk deduplication.
 - Generate a random HMAC key, HMAC-protect all chunk hashes in the response, include key in footer
 - Set `shard_key_expiry` to current time + configurable TTL (e.g., 7 days)
 
-### 3.3 POST /v1/xorbs/default/{hash}
+### 3.4 POST /v1/xorbs/default/{hash}
 
 Upload a serialized xorb.
 
@@ -117,7 +174,7 @@ Upload a serialized xorb.
 - Store xorb bytes content-addressed
 - Index each chunk hash → (xorb_hash, chunk_index) for dedup lookups
 
-### 3.4 POST /v1/shards
+### 3.5 POST /v1/shards
 
 Upload a shard (register files).
 
@@ -364,7 +421,7 @@ Simple web UI for browsing and managing files stored in the CAS server. Served a
 
 ### Frontend API
 
-The server exposes no endpoints beyond the Xet protocol (`/v1/*`); the
+The server exposes no endpoints beyond the Xet protocol (`/v1/*`, `/v2/*`); the
 frontend drives it directly. Uploads are chunked/hashed/packed client-side by
 `openxet-wasm` (`crates/wasm` compiled to WebAssembly) and POSTed as
 xorbs + a shard; downloads fetch the reconstruction plan from
