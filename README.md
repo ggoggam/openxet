@@ -202,10 +202,20 @@ above your longest plausible upload session. GC runs on demand via `POST
 ├── xorbs/default/{hash}    # Chunk archives
 ├── shards/{hash}           # File metadata
 ├── index/
-│   ├── files/              # file_hash → shard_hash mapping
-│   ├── ownership/          # (file_hash, owner) → ownership claim (accounting)
-│   └── chunks/             # chunk_hash → (xorb_hash, chunk_index) mapping
+│   └── index.sqlite        # Node-local index: file→shard, ownership claims,
+│                           # chunk dedup, xorb layouts
 ```
+
+The node-local index is SQLite (`OPENXET_INDEX_BACKEND=sqlite`, the default);
+set `postgres` to share one index across replicas. Both backends manage their
+schema with embedded [sqlx migrations](crates/server/migrations/) that run at
+startup.
+
+> **Breaking change:** the node-local index was previously RocksDB. Old
+> `{data_dir}/index/*.rocksdb` directories are not read or migrated — the
+> server refuses to start with `index_backend = rocksdb` and explains why.
+> Since the indexes are materialized views of uploaded shards, re-uploading
+> content rebuilds them; xorb and shard blobs are untouched.
 
 ## Frontend
 

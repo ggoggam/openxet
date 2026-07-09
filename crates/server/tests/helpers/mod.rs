@@ -47,22 +47,22 @@ impl TestServer {
     /// `postgres_url`. Used by the Postgres-gated integration test.
     #[allow(dead_code)]
     pub async fn start_with_postgres(postgres_url: &str) -> Self {
-        Self::start_configured(true, "rocksdb", Some(postgres_url.to_string())).await
+        Self::start_configured(true, "sqlite", Some(postgres_url.to_string())).await
     }
 
     async fn start_inner(auth_enabled: bool) -> Self {
-        Self::start_configured(auth_enabled, "rocksdb", None).await
+        Self::start_configured(auth_enabled, "sqlite", None).await
     }
 
     async fn start_configured(
         auth_enabled: bool,
-        rocks_index_backend: &str,
+        local_index_backend: &str,
         postgres_url: Option<String>,
     ) -> Self {
         let index_backend = if postgres_url.is_some() {
             "postgres".to_string()
         } else {
-            rocks_index_backend.to_string()
+            local_index_backend.to_string()
         };
         let temp_dir = tempfile::tempdir().unwrap();
         let data_dir = temp_dir.path().join("data");

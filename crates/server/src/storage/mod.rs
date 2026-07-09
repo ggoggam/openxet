@@ -10,7 +10,7 @@ pub use error::StorageError;
 pub use index::{
     ChunkIndex, ChunkIndexBackend, ChunkLocation, FileIndex, FileIndexBackend, FileListEntry,
     OwnerClaim, OwnerUsage, OwnershipClaim, PostgresChunkIndex, PostgresFileIndex,
-    RocksDbChunkIndex, RocksDbFileIndex, UsageReport, XorbChunk, XorbLayout, XorbSummary,
+    SqliteChunkIndex, SqliteFileIndex, UsageReport, XorbChunk, XorbLayout, XorbSummary,
     build_index,
 };
 pub use object_store_backend::ObjectStoreBackend;
