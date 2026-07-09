@@ -1,6 +1,6 @@
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::HeaderMap;
+use axum::http::{HeaderMap, HeaderName, header};
 use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -11,7 +11,7 @@ use xet_core_structures::xorb_object::constants::MAX_XORB_BYTES;
 use crate::auth::{RequireRead, RequireWrite};
 use crate::error::AppError;
 use crate::pagination::{Page, clamp_limit, cursor_after};
-use crate::routes::xorb_meta::{layout_from_info, validated_xorb_info};
+use crate::routes::xorb_meta::{layout_from_info, validated_xorb_info, xorb_info_from_stored};
 use crate::state::AppState;
 use crate::storage::index::ChunkLocation;
 use crate::storage::{ChunkIndex, StorageBackend, XorbSummary, validate_hash};
@@ -115,6 +115,61 @@ pub async fn post_xorb(
     state.chunk_index.put_xorb_layout(&hash, layout).await?;
 
     Ok(Json(XorbUploadResponse { was_inserted: true }))
+}
+
+/// HEAD /v1/xorbs/default/{hash} — existence and size probe, metadata only.
+///
+/// Not part of the Xet wire protocol; modeled on the `Head` RPC of the
+/// original xetdata CAS service, where its main job was the cheap
+/// "does this xorb already exist" check before an upload. `Content-Length`
+/// advertises the stored (serialized) size — what a GET of the xorb returns —
+/// with chunk count and unpacked size in `x-xorb-*` headers.
+///
+/// Answers from the layout index rather than the object store, so unlike GET
+/// it works on every backend, including presign-only ones where the GET route
+/// refuses to serve. That reach is also why it requires read auth: it would
+/// otherwise leak content existence that presigned backends never expose here.
+pub async fn head_xorb(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+    Path(hash): Path<String>,
+) -> Result<impl IntoResponse, AppError> {
+    validate_hash(&hash)?;
+
+    let (num_bytes_on_disk, num_chunks, unpacked_bytes) =
+        match state.chunk_index.get_xorb_layout(&hash).await? {
+            Some(layout) => (
+                layout.num_bytes_on_disk as u64,
+                layout.chunks.len() as u64,
+                layout.chunks.iter().map(|c| c.unpacked_size as u64).sum(),
+            ),
+            // Xorb stored before layouts were recorded: read and parse it,
+            // same fallback as the dedup handler. Missing xorbs 404 here.
+            None => {
+                let data = state.storage.get_xorb(&hash).await?;
+                let info = xorb_info_from_stored(&data)?;
+                (
+                    data.len() as u64,
+                    info.num_chunks as u64,
+                    info.unpacked_chunk_offsets.last().copied().unwrap_or(0) as u64,
+                )
+            }
+        };
+
+    Ok((
+        axum::http::StatusCode::OK,
+        [
+            (header::CONTENT_LENGTH, num_bytes_on_disk.to_string()),
+            (
+                HeaderName::from_static("x-xorb-num-chunks"),
+                num_chunks.to_string(),
+            ),
+            (
+                HeaderName::from_static("x-xorb-unpacked-bytes"),
+                unpacked_bytes.to_string(),
+            ),
+        ],
+    ))
 }
 
 /// GET /xorbs/default/{hash} — download xorb data with optional Range header.

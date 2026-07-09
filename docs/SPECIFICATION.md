@@ -201,6 +201,35 @@ Upload a shard (register files).
 - Index file_hash → shard for future reconstruction lookups
 - Store shard content-addressed
 
+### 3.6 HEAD /v1/xorbs/default/{hash} (OpenXet extension)
+
+Existence and size probe for a xorb — metadata only, no body. Not part of the
+Xet wire protocol (hf_xet clients never call it); modeled on the `Head` RPC of
+the original xetdata CAS service, where its main use was the cheap "does this
+xorb already exist" check before an upload.
+
+**Path params:**
+- `hash`: 64-char lowercase hex xorb hash
+
+**Headers:**
+- `Authorization: Bearer <token>` (minimum scope: `read`)
+
+**Response (200):** empty body with:
+- `Content-Length`: stored (serialized) xorb size in bytes — what a GET of the
+  xorb returns
+- `x-xorb-num-chunks`: number of chunks in the xorb
+- `x-xorb-unpacked-bytes`: total uncompressed size of the chunks
+
+**Errors:** 400 (bad hash), 401, 404 (unknown xorb)
+
+**Implementation notes:**
+- Answer from the xorb layout index — no object-store read — so the probe works
+  on every backend, including presign-only ones where the GET route refuses to
+  serve. That reach is also why it requires read auth, unlike GET: it must not
+  leak content existence that presigned backends never expose through here.
+- For xorbs stored before layouts were recorded, fall back to reading and
+  parsing the stored xorb (same fallback as the dedup handler).
+
 ---
 
 ## 4. Binary Format Details

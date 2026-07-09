@@ -168,6 +168,7 @@ Not part of the Xet wire protocol — these manage the data's lifecycle:
 | `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs |
 | `DELETE` | `/v1/files/{file_id}` | Release the caller's ownership claim on a file; the file is removed once its last claim is released |
 | `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count |
+| `HEAD` | `/v1/xorbs/default/{hash}` | Xorb existence/size probe: `Content-Length` is the stored size, plus `x-xorb-num-chunks` and `x-xorb-unpacked-bytes` headers |
 | `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (optional `?grace_seconds=` override); returns a report of what was deleted |
 | `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio |
 

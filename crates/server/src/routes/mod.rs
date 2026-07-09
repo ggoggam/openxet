@@ -42,7 +42,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/v1/xorbs", get(xorb::list_xorbs))
         .route(
             "/v1/xorbs/default/{hash}",
-            get(xorb::get_xorb).post(xorb::post_xorb),
+            get(xorb::get_xorb)
+                .post(xorb::post_xorb)
+                // Explicit HEAD (takes precedence over axum's GET-serves-HEAD):
+                // a metadata-only probe that answers from the index on every
+                // backend, where GET only serves the filesystem fallback.
+                .head(xorb::head_xorb),
         )
         .route("/v1/shards", post(shard::post_shard))
         // xet-core's RemoteClient posts to /shards (no /v1/ prefix)
