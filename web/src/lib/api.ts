@@ -1,6 +1,6 @@
-// Xet wire-protocol client (/v1/*) plus the server's management/lifecycle
-// endpoints. Uploads are chunked/hashed/packed in the browser (openxet-wasm)
-// and POSTed as xorbs + a shard; downloads fetch the reconstruction plan and
+// Xet wire-protocol client plus the server's management/lifecycle endpoints.
+// Uploads are chunked/hashed/packed in the browser (openxet-wasm) and POSTed
+// as xorbs + a shard (/v1/*); downloads fetch the /v2 reconstruction plan and
 // reassemble the file client-side from xorb byte ranges (chunk decoding via
 // openxet-wasm). The management endpoints (file/xorb listings, accounting, GC)
 // are plain JSON over the same bearer-token auth.
@@ -25,16 +25,22 @@ export interface ReconstructionTerm {
   range: ChunkRange;
 }
 
-export interface FetchInfo {
-  range: ChunkRange;
+export interface XorbRangeDescriptor {
+  /** Chunk index range within the xorb (end-exclusive). */
+  chunks: ChunkRange;
+  /** Physical byte range for the HTTP Range header (both inclusive). */
+  bytes: ByteRange;
+}
+
+export interface XorbMultiRangeFetch {
   url: string;
-  url_range: ByteRange;
+  ranges: XorbRangeDescriptor[];
 }
 
 export interface ReconstructionResponse {
   offset_into_first_range: number;
   terms: ReconstructionTerm[];
-  fetch_info: Record<string, FetchInfo[]>;
+  xorbs: Record<string, XorbMultiRangeFetch[]>;
 }
 
 export interface FileDetail {
@@ -88,7 +94,7 @@ async function authJson<T>(path: string): Promise<T> {
 // ─── Read paths ──────────────────────────────────────────────────────────────
 
 export async function fetchFileDetail(hash: string): Promise<FileDetail> {
-  const res = await authFetch(`/v1/reconstructions/${hash}`);
+  const res = await authFetch(`/v2/reconstructions/${hash}`);
   const reconstruction: ReconstructionResponse = await res.json();
   const total_size = reconstruction.terms.reduce(
     (sum, t) => sum + t.unpacked_length,
@@ -107,7 +113,7 @@ async function reconstructContent(
   range?: { start: number; end: number },
 ): Promise<ArrayBuffer> {
   const res = await authFetch(
-    `/v1/reconstructions/${hash}`,
+    `/v2/reconstructions/${hash}`,
     range ? { headers: { Range: `bytes=${range.start}-${range.end}` } } : {},
   );
   const recon: ReconstructionResponse = await res.json();
@@ -115,15 +121,29 @@ async function reconstructContent(
 
   const parts = await Promise.all(
     recon.terms.map(async (term) => {
-      const info = recon.fetch_info[term.hash]?.find(
-        (f) =>
-          f.range.start <= term.range.start && f.range.end >= term.range.end,
-      );
-      if (!info) throw new Error(`no fetch info for xorb ${term.hash}`);
-      // fetch_info URLs are presigned (token in query) — no auth header.
-      const r = await fetch(info.url, {
+      // Find the range descriptor covering this term's chunks. Our server
+      // emits one descriptor per fetch entry, but scan every entry's ranges
+      // so a spec-general multi-range response still resolves; each
+      // descriptor's byte range is independently fetchable, so one ordinary
+      // 206 request per term suffices either way.
+      let url: string | undefined;
+      let desc: XorbRangeDescriptor | undefined;
+      for (const entry of recon.xorbs[term.hash] ?? []) {
+        desc = entry.ranges.find(
+          (r) =>
+            r.chunks.start <= term.range.start &&
+            r.chunks.end >= term.range.end,
+        );
+        if (desc) {
+          url = entry.url;
+          break;
+        }
+      }
+      if (!url || !desc) throw new Error(`no fetch info for xorb ${term.hash}`);
+      // Fetch URLs are presigned (token in query) — no auth header.
+      const r = await fetch(url, {
         headers: {
-          Range: `bytes=${info.url_range.start}-${info.url_range.end}`,
+          Range: `bytes=${desc.bytes.start}-${desc.bytes.end}`,
         },
       });
       if (!r.ok && r.status !== 206) {
@@ -132,8 +152,8 @@ async function reconstructContent(
       const bytes = new Uint8Array(await r.arrayBuffer());
       return wasm.decode_chunks(
         bytes,
-        term.range.start - info.range.start,
-        term.range.end - info.range.start,
+        term.range.start - desc.chunks.start,
+        term.range.end - desc.chunks.start,
       );
     }),
   );
