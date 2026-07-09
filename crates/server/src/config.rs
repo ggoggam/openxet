@@ -53,7 +53,7 @@ pub struct StorageConfig {
     pub backend: String,
     pub data_dir: PathBuf,
 
-    /// Index backend for the dedup and file→shard indexes: `rocksdb` (default,
+    /// Index backend for the dedup and file→shard indexes: `sqlite` (default,
     /// node-local) or `postgres` (shared across replicas). Independent of
     /// `backend`, which selects where xorb/shard blobs live.
     pub index_backend: String,
@@ -144,7 +144,7 @@ impl Default for StorageConfig {
         Self {
             backend: "filesystem".to_string(),
             data_dir: PathBuf::from("./.data"),
-            index_backend: "rocksdb".to_string(),
+            index_backend: "sqlite".to_string(),
             postgres_url: None,
             postgres_max_connections: 10,
             s3_bucket: None,
