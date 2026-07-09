@@ -156,7 +156,11 @@ run = "cargo run --bin openxet-server"
 # Endpoint is localhost:9000 (not rustfs:9000): the server runs on the host, so
 # the presigned URLs it mints must be reachable from the host too. The
 # port-mapped RustFS makes localhost:9000 work for both server and client.
-env = { OPENXET_STORAGE_BACKEND = "s3", OPENXET_S3_BUCKET = "openxet", OPENXET_S3_REGION = "us-east-1", OPENXET_S3_ENDPOINT = "http://localhost:9000", OPENXET_S3_ACCESS_KEY_ID = "rustfsadmin", OPENXET_S3_SECRET_ACCESS_KEY = "rustfsadmin", OPENXET_S3_ALLOW_HTTP = "true" }
+#
+# Index is Postgres (not the default node-local SQLite) so this host flow shares
+# one index with the dockerized `openxet` service; rustfs:up already starts the
+# postgres container, reachable at localhost:5432 via its published port.
+env = { OPENXET_STORAGE_BACKEND = "s3", OPENXET_INDEX_BACKEND = "postgres", OPENXET_POSTGRES_URL = "postgres://openxet:openxet@localhost:5432/openxet", OPENXET_S3_BUCKET = "openxet", OPENXET_S3_REGION = "us-east-1", OPENXET_S3_ENDPOINT = "http://localhost:9000", OPENXET_S3_ACCESS_KEY_ID = "rustfsadmin", OPENXET_S3_SECRET_ACCESS_KEY = "rustfsadmin", OPENXET_S3_ALLOW_HTTP = "true" }
 
 [tasks.clean]
 description = "Clean build artifacts"
