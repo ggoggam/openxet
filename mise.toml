@@ -130,7 +130,7 @@ run = "bun run build"
 dir = "web"
 
 [tasks."fe:dev"]
-description = "Run the frontend dev server (proxies /v1 to localhost:8080)"
+description = "Run the frontend dev server (proxies /v1 and /v2 to localhost:8080)"
 depends = ["fe:install", "fe:wasm"]
 run = "bun run dev"
 dir = "web"

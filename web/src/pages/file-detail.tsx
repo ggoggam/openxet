@@ -676,7 +676,7 @@ export function FileDetailPage() {
               </CardHeader>
               <CardContent>
                 <CardTitle className="text-xl">
-                  {Object.keys(data.reconstruction.fetch_info).length}
+                  {Object.keys(data.reconstruction.xorbs).length}
                 </CardTitle>
               </CardContent>
             </Card>
@@ -730,23 +730,25 @@ export function FileDetailPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {Object.entries(data.reconstruction.fetch_info).flatMap(
-                    ([xorbHash, infos]) =>
-                      infos.map((info, i) => (
-                        <TableRow key={`${xorbHash}-${i}`}>
-                          <TableCell className="font-mono text-sm">
-                            {truncateHash(xorbHash, 12)}
-                          </TableCell>
-                          <TableCell>
-                            <Badge variant="outline">
-                              [{info.range.start}, {info.range.end})
-                            </Badge>
-                          </TableCell>
-                          <TableCell className="text-right text-muted-foreground">
-                            {info.url_range.start}–{info.url_range.end}
-                          </TableCell>
-                        </TableRow>
-                      )),
+                  {Object.entries(data.reconstruction.xorbs).flatMap(
+                    ([xorbHash, entries]) =>
+                      entries.flatMap((entry, i) =>
+                        entry.ranges.map((r, j) => (
+                          <TableRow key={`${xorbHash}-${i}-${j}`}>
+                            <TableCell className="font-mono text-sm">
+                              {truncateHash(xorbHash, 12)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge variant="outline">
+                                [{r.chunks.start}, {r.chunks.end})
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-right text-muted-foreground">
+                              {r.bytes.start}–{r.bytes.end}
+                            </TableCell>
+                          </TableRow>
+                        )),
+                      ),
                   )}
                 </TableBody>
               </Table>
