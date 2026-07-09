@@ -4,7 +4,8 @@
 //! database) skips it. To run:
 //!
 //! ```sh
-//! OPENXET_TEST_POSTGRES_URL=postgres://postgres:test@localhost:55432/openxet \
+//! # against the compose postgres (docker/compose.rustfs.yaml)
+//! OPENXET_TEST_POSTGRES_URL=postgres://openxet:openxet@localhost:5432/openxet \
 //!     cargo test -p openxet-server --test postgres_index -- --ignored
 //! ```
 
@@ -21,14 +22,19 @@ async fn postgres_upload_reconstruct_and_dedup() {
         .expect("set OPENXET_TEST_POSTGRES_URL to run this test");
 
     // Start from a clean schema so dedup assertions are deterministic.
+    // `_sqlx_migrations` must go too: dropping the data tables while leaving
+    // the migration ledger would make the migrator skip recreating them.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .connect(&url)
         .await
         .unwrap();
-    sqlx::query("DROP TABLE IF EXISTS file_index, chunk_index, xorb_layout, file_ownership")
-        .execute(&pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "DROP TABLE IF EXISTS file_index, chunk_index, xorb_layout, file_ownership, \
+         _sqlx_migrations",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     pool.close().await;
 
     let server = TestServer::start_with_postgres(&url).await;
