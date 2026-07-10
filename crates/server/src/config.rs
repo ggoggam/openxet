@@ -66,6 +66,17 @@ pub struct StorageConfig {
     pub s3_bucket: Option<String>,
     pub s3_region: Option<String>,
     pub s3_endpoint: Option<String>,
+
+    /// Endpoint used only when signing presigned download URLs handed to
+    /// external clients. When the server reaches object storage over an
+    /// internal address (e.g. the docker-network host `http://rustfs:9000`)
+    /// that clients cannot resolve, set this to the externally reachable
+    /// address (e.g. `http://localhost:9000`) so signed URLs point
+    /// there. The SigV4 signature is computed against this host, so it must
+    /// match what the client actually connects to. Unset falls back to
+    /// `s3_endpoint`.
+    pub s3_public_endpoint: Option<String>,
+
     pub s3_access_key_id: Option<String>,
     pub s3_secret_access_key: Option<String>,
     pub s3_allow_http: Option<bool>,
@@ -150,6 +161,7 @@ impl Default for StorageConfig {
             s3_bucket: None,
             s3_region: None,
             s3_endpoint: None,
+            s3_public_endpoint: None,
             s3_access_key_id: None,
             s3_secret_access_key: None,
             s3_allow_http: None,
@@ -243,6 +255,9 @@ impl AppConfig {
         }
         if let Ok(v) = std::env::var("OPENXET_S3_ENDPOINT") {
             self.storage.s3_endpoint = Some(v);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_PUBLIC_ENDPOINT") {
+            self.storage.s3_public_endpoint = Some(v);
         }
         if let Ok(v) = std::env::var("OPENXET_S3_ACCESS_KEY_ID") {
             self.storage.s3_access_key_id = Some(v);

@@ -10,7 +10,7 @@ services:
       RUSTFS_SECRET_KEY: rustfsadmin
       RUSTFS_CONSOLE_ENABLE: "true"
     volumes:
-      - .rustfs:/data
+      - rustfs-data:/data
 
   rustfs-init:
     image: amazon/aws-cli:latest
@@ -55,7 +55,7 @@ services:
       POSTGRES_PASSWORD: openxet
       POSTGRES_DB: openxet
     volumes:
-      - .pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U openxet -d openxet"]
       interval: 5s
@@ -75,7 +75,7 @@ services:
       postgres:
         condition: service_healthy
     volumes:
-      - .data:/.data
+      - openxet-data:/.data
     environment:
       OPENXET_HOST: "0.0.0.0"
       OPENXET_PORT: "8080"
@@ -87,6 +87,11 @@ services:
       OPENXET_S3_BUCKET: openxet
       OPENXET_S3_REGION: us-east-1
       OPENXET_S3_ENDPOINT: http://rustfs:9000
+      # The server reaches rustfs over the internal docker network, but
+      # presigned download URLs are handed to external clients that can't
+      # resolve `rustfs`. Sign those URLs against the externally reachable
+      # host instead. Override for your deployment (e.g. localhost).
+      OPENXET_S3_PUBLIC_ENDPOINT: ${OPENXET_S3_PUBLIC_ENDPOINT:-http://localhost:9000}
       OPENXET_S3_ACCESS_KEY_ID: rustfsadmin
       OPENXET_S3_SECRET_ACCESS_KEY: rustfsadmin
       OPENXET_S3_ALLOW_HTTP: "true"
@@ -101,3 +106,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+
+# Docker-managed named volumes (not host bind mounts): the container users
+# (postgres uid 70, rustfs, the server) own the data inside the volume, so no
+# root-owned dirs land in the working tree. Wipe all state with
+# `docker compose -f docker/compose.rustfs.yaml down -v`.
+volumes:
+  rustfs-data:
+  pgdata:
+  openxet-data:

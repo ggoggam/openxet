@@ -28,10 +28,17 @@ FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
 
+# Non-root user: the cluster forbids running deployments as root.
+RUN groupadd --system --gid 10001 openxet && \
+    useradd --system --uid 10001 --gid openxet --no-create-home openxet
+
 WORKDIR /app
 
 COPY --from=builder /app/target/release/openxet-server /app/openxet-server
 COPY --from=frontend /app/dist /app/web/dist
+
+# /data is a mounted volume the server writes to; make it owned by the non-root user.
+RUN mkdir -p /data && chown -R openxet:openxet /app /data
 
 ENV OPENXET_HOST=0.0.0.0
 ENV OPENXET_PORT=8080
@@ -40,5 +47,7 @@ ENV OPENXET_FRONTEND_DIR=/app/web/dist
 
 EXPOSE 8080
 VOLUME /data
+
+USER openxet
 
 ENTRYPOINT ["/app/openxet-server"]

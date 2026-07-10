@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, bail};
 use object_store::ObjectStore;
-use object_store::aws::AmazonS3Builder;
+use object_store::aws::{AmazonS3, AmazonS3Builder};
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::local::LocalFileSystem;
@@ -44,29 +44,43 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
                     .as_deref()
                     .context("s3_bucket is required for S3 backend")?;
 
-                let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+                // Build an S3 client for a given endpoint. All settings are
+                // shared except the endpoint, so the same closure builds both
+                // the data client (internal endpoint) and, when configured, a
+                // separate signing client (public endpoint).
+                let make_client = |endpoint: Option<&str>| -> anyhow::Result<AmazonS3> {
+                    let mut builder = AmazonS3Builder::new().with_bucket_name(bucket);
+                    if let Some(region) = &config.s3_region {
+                        builder = builder.with_region(region);
+                    }
+                    if let Some(endpoint) = endpoint {
+                        builder = builder.with_endpoint(endpoint);
+                    }
+                    if let Some(key_id) = &config.s3_access_key_id {
+                        builder = builder.with_access_key_id(key_id);
+                    }
+                    if let Some(secret) = &config.s3_secret_access_key {
+                        builder = builder.with_secret_access_key(secret);
+                    }
+                    if config.s3_allow_http == Some(true) {
+                        builder = builder.with_allow_http(true);
+                    }
+                    builder.build().context("failed to build S3 client")
+                };
 
-                if let Some(region) = &config.s3_region {
-                    builder = builder.with_region(region);
-                }
-                if let Some(endpoint) = &config.s3_endpoint {
-                    builder = builder.with_endpoint(endpoint);
-                }
-                if let Some(key_id) = &config.s3_access_key_id {
-                    builder = builder.with_access_key_id(key_id);
-                }
-                if let Some(secret) = &config.s3_secret_access_key {
-                    builder = builder.with_secret_access_key(secret);
-                }
-                if config.s3_allow_http == Some(true) {
-                    builder = builder.with_allow_http(true);
-                }
+                let s3 = Arc::new(make_client(config.s3_endpoint.as_deref())?);
 
-                let s3 = Arc::new(builder.build().context("failed to build S3 client")?);
-                (
-                    s3.clone() as Arc<dyn ObjectStore>,
-                    Some(s3 as Arc<dyn Signer>),
-                )
+                // Presigned URLs are signed against the client's endpoint host.
+                // When the server reaches storage over an internal address that
+                // external clients can't resolve, sign with the public endpoint
+                // instead so handed-out URLs point at a reachable host. Presigning
+                // does no network I/O, so this client is only ever used to sign.
+                let signer: Arc<dyn Signer> = match &config.s3_public_endpoint {
+                    Some(public) => Arc::new(make_client(Some(public))?),
+                    None => s3.clone(),
+                };
+
+                (s3 as Arc<dyn ObjectStore>, Some(signer))
             }
             "gcs" => {
                 let bucket = config
@@ -111,4 +125,57 @@ pub async fn build_storage(config: &StorageConfig) -> anyhow::Result<ObjectStore
         };
 
     Ok(ObjectStoreBackend::new(store, signer))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::config::StorageConfig;
+    use crate::storage::backend::StorageBackend;
+
+    const TEST_HASH: &str = "a1b2c3d4e5f60708091011121314151617181920212223242526272829303132";
+
+    fn s3_config() -> StorageConfig {
+        StorageConfig {
+            backend: "s3".to_string(),
+            s3_bucket: Some("openxet".to_string()),
+            s3_region: Some("us-east-1".to_string()),
+            s3_endpoint: Some("http://rustfs:9000".to_string()),
+            s3_access_key_id: Some("rustfsadmin".to_string()),
+            s3_secret_access_key: Some("rustfsadmin".to_string()),
+            s3_allow_http: Some(true),
+            ..StorageConfig::default()
+        }
+    }
+
+    // Presigning does no network I/O, so these build a real S3 backend and
+    // inspect the signed URL host without ever touching a live store.
+
+    #[tokio::test]
+    async fn presigned_url_uses_internal_endpoint_by_default() {
+        let backend = build_storage(&s3_config()).await.unwrap();
+        let url = backend
+            .presigned_xorb_url(TEST_HASH, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("s3 backend signs urls");
+        assert!(url.contains("rustfs:9000"), "unexpected url: {url}");
+    }
+
+    #[tokio::test]
+    async fn presigned_url_uses_public_endpoint_when_set() {
+        let mut config = s3_config();
+        config.s3_public_endpoint = Some("http://localhost:9000".to_string());
+
+        let backend = build_storage(&config).await.unwrap();
+        let url = backend
+            .presigned_xorb_url(TEST_HASH, Duration::from_secs(60))
+            .await
+            .unwrap()
+            .expect("s3 backend signs urls");
+        assert!(url.contains("localhost:9000"), "unexpected url: {url}");
+        assert!(!url.contains("rustfs:9000"), "leaked internal host: {url}");
+    }
 }

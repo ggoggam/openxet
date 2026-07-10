@@ -83,6 +83,7 @@ same variables apply if you run the binary directly:
 | `OPENXET_S3_BUCKET` | — | `openxet` |
 | `OPENXET_S3_REGION` | — | `us-east-1` |
 | `OPENXET_S3_ENDPOINT` | — | `http://localhost:9000` |
+| `OPENXET_S3_PUBLIC_ENDPOINT` | — | endpoint for signing presigned URLs when clients can't reach `OPENXET_S3_ENDPOINT` (e.g. internal docker host); defaults to `OPENXET_S3_ENDPOINT` |
 | `OPENXET_S3_ACCESS_KEY_ID` | — | `rustfsadmin` |
 | `OPENXET_S3_SECRET_ACCESS_KEY` | — | `rustfsadmin` |
 | `OPENXET_S3_ALLOW_HTTP` | — | `true` |
