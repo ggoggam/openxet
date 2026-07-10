@@ -6,7 +6,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - .data:/.data
+      - openxet-local-data:/.data
     environment:
       - OPENXET_HOST=0.0.0.0
       - OPENXET_PORT=8080
@@ -21,3 +21,9 @@ services:
       timeout: 5s
       retries: 3
       start_period: 5s
+
+# Docker-managed named volume (not a host bind mount): the server owns the data
+# inside it, so no root-owned dir lands in the working tree. Wipe with
+# `docker compose -f docker/compose.local.yaml down -v`.
+volumes:
+  openxet-local-data:

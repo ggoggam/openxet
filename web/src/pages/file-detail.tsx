@@ -380,9 +380,9 @@ function FileContentPreview({
     return isParquetProbe(new Uint8Array(probe.data));
   }, [probe.data]);
 
-  // ponytail: parquet is fully downloaded and handed to DuckDB as a buffer;
-  // lazy range reads would need a plain-HTTP range endpoint, which the
-  // Xet-protocol-only server no longer exposes.
+  // Parquet is fully downloaded and handed to DuckDB as a buffer; lazy range
+  // reads would need a plain-HTTP range endpoint, which the Xet-protocol-only
+  // server no longer exposes. So download the whole file once the probe settles.
   const { data, isLoading, error } = useQuery({
     queryKey: ["file-content", hash],
     queryFn: () => fetchFileContent(hash),
@@ -402,15 +402,18 @@ function FileContentPreview({
     return detectContentType(bytes);
   }, [data, isParquet]);
 
-  const handleDownload = () => {
-    if (!data) return;
-    const blob = new Blob([data]);
+  const saveBlob = (buf: ArrayBuffer) => {
+    const blob = new Blob([buf]);
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
     a.download = hash;
     a.click();
     URL.revokeObjectURL(url);
+  };
+
+  const handleDownload = () => {
+    if (data) saveBlob(data);
   };
 
   if (probe.error || error) {
@@ -421,8 +424,7 @@ function FileContentPreview({
         </CardHeader>
         <CardContent>
           <p className="text-sm text-destructive">
-            Failed to load content:{" "}
-            {(probe.error || error)?.message}
+            Failed to load content: {(probe.error || error)?.message}
           </p>
         </CardContent>
       </Card>

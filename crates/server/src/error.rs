@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("not found: {0}")]
     NotFound(String),
 
+    #[error("unsupported media type: {0}")]
+    UnsupportedMediaType(String),
+
     #[error("range not satisfiable")]
     RangeNotSatisfiable,
 
@@ -30,10 +33,16 @@ pub enum AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            AppError::BadRequest(msg) => {
+                tracing::warn!("bad request: {msg}");
+                (StatusCode::BAD_REQUEST, msg.clone())
+            }
             AppError::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, msg.clone()),
             AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+            AppError::UnsupportedMediaType(msg) => {
+                (StatusCode::UNSUPPORTED_MEDIA_TYPE, msg.clone())
+            }
             AppError::RangeNotSatisfiable => (
                 StatusCode::RANGE_NOT_SATISFIABLE,
                 "range not satisfiable".to_string(),

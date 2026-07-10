@@ -23,6 +23,17 @@ description = "Bring up docker compose services"
 run = "docker compose -f docker/compose.rustfs.yaml up -d --build --force-recreate --remove-orphans"
 alias = "up"
 
+# Local variant using the filesystem backend (no RustFS/Postgres) for quick
+# testing, all inside Docker.
+[tasks."docker:local"]
+description = "Build & run the server in Docker (filesystem backend) on :8080"
+run = "docker compose -f docker/compose.local.yaml up --build --force-recreate --remove-orphans"
+alias = "local"
+
+[tasks."docker:local:down"]
+description = "Bring down the local (filesystem) docker server"
+run = "docker compose -f docker/compose.local.yaml down --remove-orphans"
+
 [tasks."docker:down"]
 description = "bring down docker compose services"
 run = "docker compose -f docker/compose.rustfs.yaml down --remove-orphans"
