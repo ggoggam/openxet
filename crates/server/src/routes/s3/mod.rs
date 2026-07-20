@@ -19,14 +19,25 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Path, Query, State};
 use axum::routing::get;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::RequireWrite;
+use crate::auth::{RequireRead, RequireWrite};
 use crate::error::AppError;
+use crate::pagination::{Page, clamp_limit, cursor_after};
 use crate::state::AppState;
-use crate::storage::{FileIndex, S3Credential, S3Object, validate_hash};
+use crate::storage::{
+    BucketSummary, FileIndex, S3Credential, S3CredentialSummary, S3Object, validate_hash,
+};
+
+/// Current unix time in seconds (saturating to 0 before the epoch).
+fn now_unix() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 /// Build the gateway routes under `prefix` (e.g. `/s3`). Path-style addressing:
 /// clients point `--endpoint-url {public_url}{prefix}` at the server.
@@ -93,10 +104,7 @@ pub async fn register_object(
         .map(|c| c.logical_bytes)
         .unwrap_or(0);
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
+    let now = now_unix();
 
     let obj = S3Object {
         bucket: req.bucket.clone(),
@@ -145,13 +153,156 @@ pub async fn create_credential(
         secret_key: secret_access_key.clone(),
         owner_id: claims.owner().to_string(),
     };
-    state.s3_index.put_credential(&cred).await?;
+    state.s3_index.put_credential(&cred, now_unix()).await?;
 
     Ok(Json(CreateCredentialResponse {
         access_key_id,
         secret_access_key,
         owner_id: cred.owner_id,
     }))
+}
+
+// ---- management listing / deletion (native JSON API) ----------------------
+
+#[derive(Debug, Serialize)]
+pub struct GatewayInfoResponse {
+    /// Whether the S3 data plane (GetObject/PutObject/…) is mounted. Management
+    /// endpoints work regardless; when this is false, registered names are not
+    /// reachable over the S3 protocol until the gateway is enabled.
+    pub enabled: bool,
+    /// The path prefix the gateway is mounted under, e.g. `/s3`.
+    pub prefix: String,
+    /// The endpoint URL S3 clients should target (`--endpoint-url`). Absolute
+    /// when the server has a configured public URL; otherwise just the prefix,
+    /// for the caller to resolve against its own origin.
+    pub endpoint: String,
+}
+
+/// GET /v1/s3/info — gateway connection details for the management UI.
+pub async fn gateway_info(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+) -> Result<Json<GatewayInfoResponse>, AppError> {
+    let prefix = state.config.server.s3_gateway_prefix.clone();
+    let endpoint = match &state.config.server.public_url {
+        Some(base) => format!("{}{}", base.trim_end_matches('/'), prefix),
+        None => prefix.clone(),
+    };
+    Ok(Json(GatewayInfoResponse {
+        enabled: state.config.server.s3_gateway_enabled,
+        prefix,
+        endpoint,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListBucketsResponse {
+    pub buckets: Vec<BucketSummary>,
+}
+
+/// GET /v1/s3/buckets — distinct buckets with object counts and total size.
+pub async fn list_buckets(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+) -> Result<Json<ListBucketsResponse>, AppError> {
+    let buckets = state.s3_index.list_buckets().await?;
+    Ok(Json(ListBucketsResponse { buckets }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListObjectsParams {
+    /// Bucket to list. Required — objects are always addressed within a bucket.
+    pub bucket: String,
+    /// Restrict to keys starting with this prefix.
+    pub prefix: Option<String>,
+    pub cursor: Option<String>,
+    pub limit: Option<usize>,
+}
+
+/// GET /v1/s3/objects — cursor-paginated object names within a bucket, ordered
+/// by key. The management counterpart to the S3 ListObjectsV2 data-plane call.
+pub async fn list_objects(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+    Query(params): Query<ListObjectsParams>,
+) -> Result<Json<Page<S3Object>>, AppError> {
+    if params.bucket.is_empty() {
+        return Err(AppError::BadRequest("bucket is required".into()));
+    }
+    let limit = clamp_limit(params.limit);
+    let prefix = params.prefix.as_deref().unwrap_or("");
+    let cursor = params.cursor.as_deref().filter(|s| !s.is_empty());
+    let after = cursor_after(cursor)?;
+
+    // Over-fetch one row so the page knows whether a next one exists.
+    let rows = state
+        .s3_index
+        .list_objects(&params.bucket, prefix, after.as_deref(), limit + 1)
+        .await?;
+
+    Ok(Json(Page::from_overfetched(rows, limit, |o| o.key.clone())))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteObjectParams {
+    pub bucket: String,
+    pub key: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteObjectResponse {
+    /// Whether a name was removed (false if no such (bucket, key) existed).
+    pub deleted: bool,
+}
+
+/// DELETE /v1/s3/objects?bucket=&key= — remove an object name. Intentionally
+/// does **not** release the underlying file's ownership claim, matching the S3
+/// gateway's DeleteObject: one owner may name identical content under several
+/// keys, so per-name refcounting is deferred and content is never orphaned here.
+pub async fn delete_object(
+    State(state): State<AppState>,
+    _auth: RequireWrite,
+    Query(params): Query<DeleteObjectParams>,
+) -> Result<Json<DeleteObjectResponse>, AppError> {
+    if params.bucket.is_empty() || params.key.is_empty() {
+        return Err(AppError::BadRequest("bucket and key are required".into()));
+    }
+    let removed = state
+        .s3_index
+        .delete_object(&params.bucket, &params.key)
+        .await?;
+    Ok(Json(DeleteObjectResponse {
+        deleted: removed.is_some(),
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListCredentialsResponse {
+    pub items: Vec<S3CredentialSummary>,
+}
+
+/// GET /v1/s3/credentials — all minted credentials without their secrets.
+pub async fn list_credentials(
+    State(state): State<AppState>,
+    _auth: RequireRead,
+) -> Result<Json<ListCredentialsResponse>, AppError> {
+    let items = state.s3_index.list_credentials().await?;
+    Ok(Json(ListCredentialsResponse { items }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeleteCredentialResponse {
+    pub deleted: bool,
+}
+
+/// DELETE /v1/s3/credentials/{access_key_id} — revoke a credential.
+pub async fn delete_credential(
+    State(state): State<AppState>,
+    _auth: RequireWrite,
+    Path(access_key_id): Path<String>,
+) -> Result<Json<DeleteCredentialResponse>, AppError> {
+    let deleted = state.s3_index.delete_credential(&access_key_id).await?;
+    Ok(Json(DeleteCredentialResponse { deleted }))
 }
 
 /// `n` uppercase base32-ish characters (A–Z, 2–7), for an access-key id.

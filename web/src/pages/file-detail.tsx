@@ -1,11 +1,11 @@
-import React, { useMemo, useEffect, Suspense } from "react";
+import React, { useMemo, useEffect, useState, Suspense } from "react";
 import {
   useMutation,
   useQuery,
   useQueryClient,
 } from "@tanstack/react-query";
 import { useParams, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowLeft, Download, Loader2, Trash2 } from "lucide-react";
+import { ArrowLeft, Cloud, Download, Loader2, Plus, Trash2 } from "lucide-react";
 import {
   Card,
   CardContent,
@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/table";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
   fetchFileDetail,
@@ -30,6 +31,7 @@ import {
   fetchFileContent,
   fetchFileContentRange,
   deleteFile,
+  registerS3Object,
 } from "@/lib/api";
 import { formatBytes, formatUnixTime, truncateHash } from "@/lib/format";
 
@@ -621,21 +623,23 @@ export function FileDetailPage() {
             {isLoading ? <Skeleton className="h-4 w-96 inline-block" /> : hash}
           </p>
         </div>
-        <Button
-          variant="outline"
-          size="sm"
-          className="ml-auto"
-          onClick={handleRemove}
-          disabled={remove.isPending}
-          title="Release your ownership claim on this file"
-        >
-          {remove.isPending ? (
-            <Loader2 className="size-4 animate-spin" />
-          ) : (
-            <Trash2 className="size-4" />
-          )}
-          Delete
-        </Button>
+        <div className="ml-auto flex items-center gap-2">
+          <ExposeS3Object hash={hash} />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={handleRemove}
+            disabled={remove.isPending}
+            title="Release your ownership claim on this file"
+          >
+            {remove.isPending ? (
+              <Loader2 className="size-4 animate-spin" />
+            ) : (
+              <Trash2 className="size-4" />
+            )}
+            Delete
+          </Button>
+        </div>
       </div>
 
       {remove.isError && (
@@ -758,6 +762,92 @@ export function FileDetailPage() {
           </div>
         </>
       ) : null}
+    </div>
+  );
+}
+
+/** A popover-style inline form to register this file under an S3 (bucket, key)
+ * name, pre-filled with the file's hash. The counterpart to the register form
+ * on the S3 gateway page. */
+function ExposeS3Object({ hash }: { hash: string }) {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [bucket, setBucket] = useState("");
+  const [key, setKey] = useState("");
+
+  const register = useMutation({
+    mutationFn: () =>
+      registerS3Object({ bucket: bucket.trim(), key: key.trim(), file_hash: hash }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["s3-buckets"] });
+      queryClient.invalidateQueries({ queryKey: ["s3-objects"] });
+    },
+  });
+
+  const valid = bucket.trim().length > 0 && key.trim().length > 0;
+
+  return (
+    <div className="relative">
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => setOpen((v) => !v)}
+        title="Register this file under an S3 (bucket, key) name"
+      >
+        <Cloud className="size-4" />
+        Expose as S3 object
+      </Button>
+
+      {open && (
+        <div className="absolute right-0 z-50 mt-2 w-80 rounded-md border bg-background p-3 shadow-md">
+          <p className="mb-2 text-sm font-medium">Register S3 name</p>
+          <div className="space-y-2">
+            <Input
+              placeholder="Bucket"
+              value={bucket}
+              onChange={(e) => setBucket(e.target.value)}
+              className="h-8"
+            />
+            <Input
+              placeholder="Key (e.g. dir/file.bin)"
+              value={key}
+              onChange={(e) => setKey(e.target.value)}
+              className="h-8 font-mono text-sm"
+            />
+            {register.isError && (
+              <p className="text-xs text-destructive">
+                {register.error.message}
+              </p>
+            )}
+            {register.isSuccess ? (
+              <p className="text-xs text-green-700 dark:text-green-400">
+                Registered.{" "}
+                <Link to="/s3" className="underline">
+                  View on S3 Gateway
+                </Link>
+              </p>
+            ) : (
+              <div className="flex justify-end gap-2">
+                <Button variant="ghost" size="sm" onClick={() => setOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => register.mutate()}
+                  disabled={!valid || register.isPending}
+                >
+                  {register.isPending ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : (
+                    <Plus className="size-4" />
+                  )}
+                  Register
+                </Button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

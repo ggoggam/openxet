@@ -8,7 +8,7 @@
 use sqlx::{PgPool, SqlitePool};
 
 use super::super::error::StorageError;
-use super::{S3Credential, S3Object};
+use super::{BucketSummary, S3Credential, S3CredentialSummary, S3Object};
 
 fn err(e: sqlx::Error) -> StorageError {
     StorageError::Index(e.to_string())
@@ -146,6 +146,24 @@ impl SqliteS3Index {
         Ok(row.map(|(file_hash,)| file_hash))
     }
 
+    pub async fn list_buckets(&self) -> Result<Vec<BucketSummary>, StorageError> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT bucket, COUNT(*), COALESCE(SUM(size), 0) \
+             FROM s3_objects GROUP BY bucket ORDER BY bucket",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(bucket, object_count, total_size)| BucketSummary {
+                bucket,
+                object_count: object_count as u64,
+                total_size: total_size as u64,
+            })
+            .collect())
+    }
+
     pub async fn get_credential(
         &self,
         access_key_id: &str,
@@ -164,20 +182,57 @@ impl SqliteS3Index {
         }))
     }
 
-    pub async fn put_credential(&self, cred: &S3Credential) -> Result<(), StorageError> {
+    pub async fn put_credential(
+        &self,
+        cred: &S3Credential,
+        created_at: i64,
+    ) -> Result<(), StorageError> {
         sqlx::query(
-            "INSERT INTO s3_credentials (access_key_id, secret_key, owner_id) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO s3_credentials (access_key_id, secret_key, owner_id, created_at) \
+             VALUES ($1, $2, $3, $4) \
              ON CONFLICT (access_key_id) DO UPDATE SET \
-                 secret_key = EXCLUDED.secret_key, owner_id = EXCLUDED.owner_id",
+                 secret_key = EXCLUDED.secret_key, owner_id = EXCLUDED.owner_id, \
+                 created_at = EXCLUDED.created_at",
         )
         .bind(&cred.access_key_id)
         .bind(&cred.secret_key)
         .bind(&cred.owner_id)
+        .bind(created_at)
         .execute(&self.pool)
         .await
         .map_err(err)?;
         Ok(())
+    }
+
+    pub async fn list_credentials(&self) -> Result<Vec<S3CredentialSummary>, StorageError> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT access_key_id, owner_id, created_at FROM s3_credentials \
+             ORDER BY created_at DESC, access_key_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(access_key_id, owner_id, created_at)| S3CredentialSummary {
+                    access_key_id,
+                    owner_id,
+                    created_at,
+                },
+            )
+            .collect())
+    }
+
+    pub async fn delete_credential(&self, access_key_id: &str) -> Result<bool, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "DELETE FROM s3_credentials WHERE access_key_id = $1 RETURNING access_key_id",
+        )
+        .bind(access_key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(row.is_some())
     }
 }
 
@@ -295,6 +350,24 @@ impl PostgresS3Index {
         Ok(row.map(|(file_hash,)| file_hash))
     }
 
+    pub async fn list_buckets(&self) -> Result<Vec<BucketSummary>, StorageError> {
+        let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+            "SELECT bucket, COUNT(*), COALESCE(SUM(size), 0) \
+             FROM s3_objects GROUP BY bucket ORDER BY bucket",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(rows
+            .into_iter()
+            .map(|(bucket, object_count, total_size)| BucketSummary {
+                bucket,
+                object_count: object_count as u64,
+                total_size: total_size as u64,
+            })
+            .collect())
+    }
+
     pub async fn get_credential(
         &self,
         access_key_id: &str,
@@ -313,19 +386,56 @@ impl PostgresS3Index {
         }))
     }
 
-    pub async fn put_credential(&self, cred: &S3Credential) -> Result<(), StorageError> {
+    pub async fn put_credential(
+        &self,
+        cred: &S3Credential,
+        created_at: i64,
+    ) -> Result<(), StorageError> {
         sqlx::query(
-            "INSERT INTO s3_credentials (access_key_id, secret_key, owner_id) \
-             VALUES ($1, $2, $3) \
+            "INSERT INTO s3_credentials (access_key_id, secret_key, owner_id, created_at) \
+             VALUES ($1, $2, $3, $4) \
              ON CONFLICT (access_key_id) DO UPDATE SET \
-                 secret_key = EXCLUDED.secret_key, owner_id = EXCLUDED.owner_id",
+                 secret_key = EXCLUDED.secret_key, owner_id = EXCLUDED.owner_id, \
+                 created_at = EXCLUDED.created_at",
         )
         .bind(&cred.access_key_id)
         .bind(&cred.secret_key)
         .bind(&cred.owner_id)
+        .bind(created_at)
         .execute(&self.pool)
         .await
         .map_err(err)?;
         Ok(())
+    }
+
+    pub async fn list_credentials(&self) -> Result<Vec<S3CredentialSummary>, StorageError> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT access_key_id, owner_id, created_at FROM s3_credentials \
+             ORDER BY created_at DESC, access_key_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(access_key_id, owner_id, created_at)| S3CredentialSummary {
+                    access_key_id,
+                    owner_id,
+                    created_at,
+                },
+            )
+            .collect())
+    }
+
+    pub async fn delete_credential(&self, access_key_id: &str) -> Result<bool, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "DELETE FROM s3_credentials WHERE access_key_id = $1 RETURNING access_key_id",
+        )
+        .bind(access_key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(row.is_some())
     }
 }

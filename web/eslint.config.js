@@ -26,4 +26,19 @@ export default defineConfig([
       "react-refresh/only-export-components": "off",
     },
   },
+  {
+    // Vendored shadcn tree-view component (installed via the shadcn registry).
+    // Treated like generated UI code: not held to our lint rules.
+    files: [
+      "src/components/tree-view.tsx",
+      "src/components/tree-node.tsx",
+      "src/components/tree-drop-indicator.tsx",
+      "src/hooks/use-tree-*.ts",
+      "src/lib/tree-*.ts",
+    ],
+    rules: {
+      "react-hooks/refs": "off",
+      "react-refresh/only-export-components": "off",
+    },
+  },
 ]);

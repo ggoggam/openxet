@@ -1,5 +1,5 @@
 import { Link, useRouterState } from "@tanstack/react-router";
-import { Boxes, Database, Files, HardDrive, KeyRound, Upload } from "lucide-react";
+import { Boxes, Cloud, Database, Files, HardDrive, KeyRound, Upload } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { setToken, useToken } from "@/lib/auth";
 import { cn } from "@/lib/utils";
@@ -8,6 +8,7 @@ const navItems = [
   { to: "/", label: "Files", icon: Files },
   { to: "/xorbs", label: "Xorbs", icon: Boxes },
   { to: "/storage", label: "Storage", icon: HardDrive },
+  { to: "/s3", label: "S3 Gateway", icon: Cloud },
   { to: "/upload", label: "Upload", icon: Upload },
 ] as const;
 
