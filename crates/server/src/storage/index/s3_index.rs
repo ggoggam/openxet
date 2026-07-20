@@ -127,6 +127,25 @@ impl SqliteS3Index {
             .collect())
     }
 
+    /// Remove the `(bucket, key)` name, returning the `file_hash` it pointed at
+    /// (so the caller can release the corresponding ownership claim). `None`
+    /// when no such object existed.
+    pub async fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "DELETE FROM s3_objects WHERE bucket = $1 AND key = $2 RETURNING file_hash",
+        )
+        .bind(bucket)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(row.map(|(file_hash,)| file_hash))
+    }
+
     pub async fn get_credential(
         &self,
         access_key_id: &str,
@@ -258,6 +277,22 @@ impl PostgresS3Index {
                 },
             )
             .collect())
+    }
+
+    pub async fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        let row: Option<(String,)> = sqlx::query_as(
+            "DELETE FROM s3_objects WHERE bucket = $1 AND key = $2 RETURNING file_hash",
+        )
+        .bind(bucket)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(err)?;
+        Ok(row.map(|(file_hash,)| file_hash))
     }
 
     pub async fn get_credential(

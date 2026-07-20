@@ -12,6 +12,7 @@
 mod error;
 mod get;
 mod list;
+mod put;
 mod sigv4;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -25,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use crate::auth::RequireWrite;
 use crate::error::AppError;
 use crate::state::AppState;
-use crate::storage::{FileIndex, S3Object, validate_hash};
+use crate::storage::{FileIndex, S3Credential, S3Object, validate_hash};
 
 /// Build the gateway routes under `prefix` (e.g. `/s3`). Path-style addressing:
 /// clients point `--endpoint-url {public_url}{prefix}` at the server.
@@ -37,7 +38,10 @@ pub fn gateway_routes(prefix: &str) -> Router<AppState> {
         )
         .route(
             &format!("{prefix}/{{bucket}}/{{*key}}"),
-            get(get::get_object).head(get::head_object),
+            get(get::get_object)
+                .head(get::head_object)
+                .put(put::put_object)
+                .delete(put::delete_object),
         )
 }
 
@@ -112,6 +116,58 @@ pub async fn register_object(
         size: obj.size,
         etag: obj.etag,
     }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct CreateCredentialResponse {
+    pub access_key_id: String,
+    /// The secret is shown once, at creation, and stored hashed nowhere else to
+    /// recover it from — the caller must capture it now.
+    pub secret_access_key: String,
+    pub owner_id: String,
+}
+
+/// POST /v1/s3/credentials — mint a SigV4 access-key/secret pair for the
+/// caller's accounting owner, so `aws`/`boto3` clients can sign gateway
+/// requests. Requires write scope on the native API; the minted credential then
+/// authorizes S3 requests as that same owner.
+pub async fn create_credential(
+    State(state): State<AppState>,
+    RequireWrite(claims): RequireWrite,
+) -> Result<Json<CreateCredentialResponse>, AppError> {
+    // AKIA-prefixed id and a 40-char secret, matching the shape S3 tooling
+    // expects; both are random and opaque.
+    let access_key_id = format!("AKIA{}", random_b32(16));
+    let secret_access_key = random_secret(40);
+
+    let cred = S3Credential {
+        access_key_id: access_key_id.clone(),
+        secret_key: secret_access_key.clone(),
+        owner_id: claims.owner().to_string(),
+    };
+    state.s3_index.put_credential(&cred).await?;
+
+    Ok(Json(CreateCredentialResponse {
+        access_key_id,
+        secret_access_key,
+        owner_id: cred.owner_id,
+    }))
+}
+
+/// `n` uppercase base32-ish characters (A–Z, 2–7), for an access-key id.
+fn random_b32(n: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    (0..n)
+        .map(|_| ALPHABET[rand::random::<usize>() % ALPHABET.len()] as char)
+        .collect()
+}
+
+/// `n` characters from the SigV4 secret alphabet (base64-url without padding).
+fn random_secret(n: usize) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    (0..n)
+        .map(|_| ALPHABET[rand::random::<usize>() % ALPHABET.len()] as char)
+        .collect()
 }
 
 // ---- date formatting (no chrono dependency) -------------------------------

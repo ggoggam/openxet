@@ -463,6 +463,17 @@ impl S3IndexBackend {
         }
     }
 
+    pub async fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<String>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.delete_object(bucket, key).await,
+            Self::Postgres(i) => i.delete_object(bucket, key).await,
+        }
+    }
+
     pub async fn get_credential(
         &self,
         access_key_id: &str,

@@ -64,19 +64,30 @@ pub async fn post_xorb(
     body: Bytes,
 ) -> Result<Json<XorbUploadResponse>, AppError> {
     validate_hash(&hash)?;
+    let was_inserted = ingest_xorb(&state, &hash, body).await?;
+    Ok(Json(XorbUploadResponse { was_inserted }))
+}
 
+/// Validate, store, and index one serialized xorb, returning whether it was
+/// newly inserted (`false` if it already existed). Shared by the xorb upload
+/// endpoint and the S3 gateway's server-side write path, so both go through the
+/// same CAS-invariant check (chunk hashes recomputed and aggregated against
+/// `hash`) and the same chunk/layout indexing. `hash` must already be validated.
+pub(crate) async fn ingest_xorb(
+    state: &AppState,
+    hash: &str,
+    body: Bytes,
+) -> Result<bool, AppError> {
     if body.len() > max_serialized_xorb_size() {
         return Err(AppError::PayloadTooLarge);
     }
 
     // Idempotent: if xorb already exists, return early
-    if state.storage.xorb_exists(&hash).await? {
-        return Ok(Json(XorbUploadResponse {
-            was_inserted: false,
-        }));
+    if state.storage.xorb_exists(hash).await? {
+        return Ok(false);
     }
 
-    let expected = MerkleHash::from_hex(&hash)
+    let expected = MerkleHash::from_hex(hash)
         .map_err(|e| AppError::BadRequest(format!("invalid xorb hash: {e}")))?;
 
     // Recomputes every chunk hash from the (decompressed) data and checks the
@@ -93,7 +104,7 @@ pub async fn post_xorb(
     let layout = layout_from_info(&info, body.len() as u32);
 
     // Store the xorb
-    state.storage.put_xorb(&hash, body).await?;
+    state.storage.put_xorb(hash, body).await?;
 
     // Index all chunks in one batched write.
     let entries: Vec<(String, ChunkLocation)> = info
@@ -104,7 +115,7 @@ pub async fn post_xorb(
             (
                 chunk_hash.hex(),
                 ChunkLocation {
-                    xorb_hash: hash.clone(),
+                    xorb_hash: hash.to_string(),
                     chunk_index: i as u32,
                 },
             )
@@ -112,9 +123,9 @@ pub async fn post_xorb(
         .collect();
     state.chunk_index.put_batch(entries).await?;
 
-    state.chunk_index.put_xorb_layout(&hash, layout).await?;
+    state.chunk_index.put_xorb_layout(hash, layout).await?;
 
-    Ok(Json(XorbUploadResponse { was_inserted: true }))
+    Ok(true)
 }
 
 /// GET /xorbs/default/{hash} — download xorb data with optional Range header.
