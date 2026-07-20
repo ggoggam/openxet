@@ -67,7 +67,7 @@ fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppErro
 ///
 /// Returns `None` when the layout predates recorded compressed sizes (any chunk
 /// still has the `0` sentinel), so the caller falls back to reading the xorb.
-fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>> {
+pub(crate) fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>> {
     if layout.chunks.iter().any(|c| c.compressed_size == 0) {
         return None;
     }
@@ -84,14 +84,14 @@ fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>
     Some(offsets)
 }
 
-/// Resolve `file_id` to its reconstruction terms, trimmed to the request's
-/// Range header when present. Returns the byte offset into the first term
-/// along with the (possibly trimmed) terms.
-async fn reconstruction_terms(
+/// Resolve `file_id` to its full, untrimmed reconstruction terms in file order,
+/// by looking up its shard and parsing the file's entry list. Shared by the
+/// reconstruction endpoints (which then trim to a Range) and the S3 gateway
+/// (which reassembles the bytes server-side).
+pub(crate) async fn file_terms(
     state: &AppState,
     file_id: &str,
-    headers: &HeaderMap,
-) -> Result<(u64, Vec<CASReconstructionTerm>), AppError> {
+) -> Result<Vec<CASReconstructionTerm>, AppError> {
     validate_hash(file_id)?;
 
     // Look up file → shard
@@ -116,8 +116,8 @@ async fn reconstruction_terms(
             ))
         })?;
 
-    // Build the initial terms list
-    let mut terms: Vec<CASReconstructionTerm> = (0..file_view.num_entries())
+    // Build the terms list
+    Ok((0..file_view.num_entries())
         .map(|i| {
             let entry = file_view.entry(i);
             CASReconstructionTerm {
@@ -129,7 +129,18 @@ async fn reconstruction_terms(
                 },
             }
         })
-        .collect();
+        .collect())
+}
+
+/// Resolve `file_id` to its reconstruction terms, trimmed to the request's
+/// Range header when present. Returns the byte offset into the first term
+/// along with the (possibly trimmed) terms.
+async fn reconstruction_terms(
+    state: &AppState,
+    file_id: &str,
+    headers: &HeaderMap,
+) -> Result<(u64, Vec<CASReconstructionTerm>), AppError> {
+    let mut terms = file_terms(state, file_id).await?;
 
     let mut offset_into_first_range: u64 = 0;
 

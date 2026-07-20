@@ -24,6 +24,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.8"
 tower-http = { version = "0.6", features = ["cors", "fs", "trace", "limit"] }
 jsonwebtoken = "9"
+hmac = "0.12"
+sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 clap = { version = "4", features = ["derive"] }
 toml = "0.8"
@@ -38,3 +40,6 @@ xet-data = { workspace = true }
 tempfile = "3"
 tokio = { version = "1", features = ["full", "test-util"] }
 reqwest = { version = "0.12", features = ["json"] }
+hmac = "0.12"
+sha2 = "0.10"
+hex = { workspace = true }

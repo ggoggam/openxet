@@ -45,6 +45,16 @@ pub struct ServerConfig {
     /// and would let a request steer fetch URLs (with an embedded token) at an
     /// arbitrary host. Leave unset only for local/dev use.
     pub public_url: Option<String>,
+
+    /// Enable the S3-compatible read gateway (Phase 1: GetObject / HeadObject /
+    /// HeadBucket / ListObjectsV2). Off by default. See [`Self::s3_gateway_prefix`].
+    pub s3_gateway_enabled: bool,
+
+    /// Path prefix the S3 gateway is mounted under (default `/s3`). Point S3
+    /// clients at `{public_url}{prefix}` with path-style addressing, e.g.
+    /// `aws --endpoint-url http://host/s3`. A prefix avoids colliding with the
+    /// `/v1`, `/v2`, `/shards` routes and the SPA fallback.
+    pub s3_gateway_prefix: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -146,6 +156,8 @@ impl Default for ServerConfig {
             port: 8080,
             frontend_dir: PathBuf::from("./web/dist"),
             public_url: None,
+            s3_gateway_enabled: false,
+            s3_gateway_prefix: "/s3".to_string(),
         }
     }
 }
@@ -232,6 +244,12 @@ impl AppConfig {
         }
         if let Ok(public_url) = std::env::var("OPENXET_PUBLIC_URL") {
             self.server.public_url = Some(public_url);
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_GATEWAY_ENABLED") {
+            self.server.s3_gateway_enabled = v == "true" || v == "1";
+        }
+        if let Ok(v) = std::env::var("OPENXET_S3_GATEWAY_PREFIX") {
+            self.server.s3_gateway_prefix = v;
         }
         if let Ok(backend) = std::env::var("OPENXET_STORAGE_BACKEND") {
             self.storage.backend = backend;

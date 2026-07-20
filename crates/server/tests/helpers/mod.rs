@@ -29,6 +29,9 @@ const TEST_SECRET: &str = "test-secret";
 pub struct TestServer {
     pub base_url: String,
     pub client: reqwest::Client,
+    /// The server's S3 gateway index, so tests can seed credentials (there is
+    /// no HTTP endpoint for that in Phase 1).
+    pub s3_index: Arc<openxet_server::storage::S3IndexBackend>,
     _temp_dir: tempfile::TempDir,
 }
 
@@ -48,6 +51,13 @@ impl TestServer {
     #[allow(dead_code)]
     pub async fn start_with_postgres(postgres_url: &str) -> Self {
         Self::start_configured(true, "sqlite", Some(postgres_url.to_string())).await
+    }
+
+    /// Postgres-backed, auth disabled — for exercising the S3 read gateway
+    /// (which bypasses SigV4 when auth is off) against the Postgres index.
+    #[allow(dead_code)]
+    pub async fn start_with_postgres_no_auth(postgres_url: &str) -> Self {
+        Self::start_configured(false, "sqlite", Some(postgres_url.to_string())).await
     }
 
     async fn start_inner(auth_enabled: bool) -> Self {
@@ -80,6 +90,9 @@ impl TestServer {
                 port: 0, // OS-assigned
                 frontend_dir,
                 public_url: None,
+                // Exercise the S3 gateway in integration tests.
+                s3_gateway_enabled: true,
+                s3_gateway_prefix: "/s3".to_string(),
             },
             storage: openxet_server::config::StorageConfig {
                 backend: "filesystem".to_string(),
@@ -97,9 +110,11 @@ impl TestServer {
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
-        let (file_index, chunk_index) = build_index(&config.storage).await.unwrap();
+        let (file_index, chunk_index, s3_index) = build_index(&config.storage).await.unwrap();
         let file_index = Arc::new(file_index);
         let chunk_index = Arc::new(chunk_index);
+        let s3_index = Arc::new(s3_index);
+        let s3_index_handle = s3_index.clone();
 
         let jwks = Arc::new(openxet_server::auth::JwksCache::new(
             config.auth.oidc_issuers.clone(),
@@ -110,6 +125,7 @@ impl TestServer {
             storage,
             file_index,
             chunk_index,
+            s3_index,
             config: Arc::new(config),
             jwks,
             // Tests mint HS256 tokens against this known secret, exercising
@@ -132,8 +148,23 @@ impl TestServer {
         TestServer {
             base_url,
             client,
+            s3_index: s3_index_handle,
             _temp_dir: temp_dir,
         }
+    }
+
+    /// Seed a SigV4 credential directly into the gateway index (no HTTP endpoint
+    /// exists for this in Phase 1).
+    #[allow(dead_code)]
+    pub async fn seed_s3_credential(&self, access_key_id: &str, secret_key: &str, owner: &str) {
+        self.s3_index
+            .put_credential(&openxet_server::storage::S3Credential {
+                access_key_id: access_key_id.to_string(),
+                secret_key: secret_key.to_string(),
+                owner_id: owner.to_string(),
+            })
+            .await
+            .unwrap();
     }
 
     pub fn read_token(&self) -> String {
