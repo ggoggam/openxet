@@ -1,4 +1,5 @@
 pub mod postgres_index;
+pub mod s3_index;
 pub mod sqlite_index;
 
 use anyhow::{Context, bail};
@@ -10,6 +11,7 @@ use crate::config::StorageConfig;
 use super::error::StorageError;
 
 pub use postgres_index::{PostgresChunkIndex, PostgresFileIndex};
+pub use s3_index::{PostgresS3Index, SqliteS3Index};
 pub use sqlite_index::{SqliteChunkIndex, SqliteFileIndex};
 
 /// A location where a chunk can be found: which xorb and at what index within it.
@@ -88,6 +90,34 @@ pub struct FileListEntry {
     /// Logical size from an ownership claim, or `0` for a pre-accounting file
     /// that has no claims.
     pub logical_bytes: u64,
+}
+
+/// One S3 gateway object: a friendly `(bucket, key)` name mapped onto an
+/// already-uploaded file, with the metadata S3 responses need captured at
+/// registration time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3Object {
+    pub bucket: String,
+    pub key: String,
+    /// The content-addressed file this name resolves to.
+    pub file_hash: String,
+    /// Logical (uncompressed) size in bytes; the object's `Content-Length`.
+    pub size: u64,
+    /// Opaque entity tag returned to S3 clients (currently the file hash).
+    pub etag: String,
+    /// Accounting owner that registered the name.
+    pub owner_id: String,
+    /// Registration time in unix seconds; the object's `Last-Modified`.
+    pub last_modified: i64,
+}
+
+/// One SigV4 credential: an access-key-id, its shared secret, and the
+/// accounting owner requests signed with it act as.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3Credential {
+    pub access_key_id: String,
+    pub secret_key: String,
+    pub owner_id: String,
 }
 
 /// One row of the paginated xorb listing, sourced from the layout index (the
@@ -389,21 +419,84 @@ impl ChunkIndex for ChunkIndexBackend {
     }
 }
 
-/// Build the file and chunk indexes from configuration.
+/// An [`S3Object`]/[`S3Credential`] store selected at startup from
+/// configuration. Inherent async methods (rather than a trait) — there is a
+/// single consumer (the S3 gateway routes) that always holds the enum, so the
+/// trait indirection the file/chunk indexes need for their generic callers
+/// would be pure boilerplate here.
+pub enum S3IndexBackend {
+    Sqlite(SqliteS3Index),
+    Postgres(PostgresS3Index),
+}
+
+impl S3IndexBackend {
+    pub async fn get_object(
+        &self,
+        bucket: &str,
+        key: &str,
+    ) -> Result<Option<S3Object>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.get_object(bucket, key).await,
+            Self::Postgres(i) => i.get_object(bucket, key).await,
+        }
+    }
+
+    pub async fn put_object(&self, obj: &S3Object) -> Result<(), StorageError> {
+        match self {
+            Self::Sqlite(i) => i.put_object(obj).await,
+            Self::Postgres(i) => i.put_object(obj).await,
+        }
+    }
+
+    /// Objects in `bucket` whose key starts with `prefix`, keyset-paginated:
+    /// keys strictly greater than `after`, ordered by key, at most `limit`.
+    pub async fn list_objects(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<S3Object>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.list_objects(bucket, prefix, after, limit).await,
+            Self::Postgres(i) => i.list_objects(bucket, prefix, after, limit).await,
+        }
+    }
+
+    pub async fn get_credential(
+        &self,
+        access_key_id: &str,
+    ) -> Result<Option<S3Credential>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.get_credential(access_key_id).await,
+            Self::Postgres(i) => i.get_credential(access_key_id).await,
+        }
+    }
+
+    pub async fn put_credential(&self, cred: &S3Credential) -> Result<(), StorageError> {
+        match self {
+            Self::Sqlite(i) => i.put_credential(cred).await,
+            Self::Postgres(i) => i.put_credential(cred).await,
+        }
+    }
+}
+
+/// Build the file, chunk, and S3 gateway indexes from configuration.
 ///
 /// `sqlite` (the default) keeps a node-local index and is fine for a single
 /// instance; `postgres` shares one index across replicas so dedup and
-/// reconstruction stay consistent when the server is scaled out. Both indexes
+/// reconstruction stay consistent when the server is scaled out. All indexes
 /// share a single pool on either path.
 pub async fn build_index(
     config: &StorageConfig,
-) -> anyhow::Result<(FileIndexBackend, ChunkIndexBackend)> {
+) -> anyhow::Result<(FileIndexBackend, ChunkIndexBackend, S3IndexBackend)> {
     match config.index_backend.as_str() {
         "sqlite" => {
             let pool = sqlite_index::connect(&config.data_dir).await?;
             Ok((
                 FileIndexBackend::Sqlite(SqliteFileIndex::new(pool.clone())),
-                ChunkIndexBackend::Sqlite(SqliteChunkIndex::new(pool)),
+                ChunkIndexBackend::Sqlite(SqliteChunkIndex::new(pool.clone())),
+                S3IndexBackend::Sqlite(SqliteS3Index::new(pool)),
             ))
         }
         "rocksdb" => bail!(
@@ -426,7 +519,8 @@ pub async fn build_index(
             postgres_index::init_schema(&pool).await?;
             Ok((
                 FileIndexBackend::Postgres(PostgresFileIndex::new(pool.clone())),
-                ChunkIndexBackend::Postgres(PostgresChunkIndex::new(pool)),
+                ChunkIndexBackend::Postgres(PostgresChunkIndex::new(pool.clone())),
+                S3IndexBackend::Postgres(PostgresS3Index::new(pool)),
             ))
         }
         other => bail!("unknown index backend: {other}"),

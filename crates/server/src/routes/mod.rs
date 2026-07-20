@@ -2,6 +2,7 @@ mod admin;
 mod dedup;
 mod files;
 mod reconstruction;
+mod s3;
 mod shard;
 mod xorb;
 mod xorb_meta;
@@ -66,7 +67,11 @@ pub fn build_router(state: AppState) -> Router {
             get(files::get_file).delete(files::delete_file),
         )
         .route("/v1/gc", post(admin::post_gc))
-        .route("/v1/accounting", get(admin::get_accounting));
+        .route("/v1/accounting", get(admin::get_accounting))
+        // S3 gateway management: register a friendly (bucket, key) name for an
+        // already-uploaded file. The read gateway itself is mounted separately
+        // (below) under the configured S3 prefix.
+        .route("/v1/s3/objects", post(s3::register_object));
 
     let frontend_dir = &state.config.server.frontend_dir;
     let spa_fallback = ServeDir::new(frontend_dir)
@@ -124,9 +129,17 @@ pub fn build_router(state: AppState) -> Router {
             },
         );
 
-    Router::new()
-        .merge(cas_routes)
-        .fallback_service(spa_fallback)
+    let mut app = Router::new().merge(cas_routes);
+
+    // Mount the S3-compatible read gateway under its configured prefix when
+    // enabled. Merged (with full `/{prefix}/…` route paths) rather than nested
+    // so the SigV4 verifier sees the exact path the client signed. Sits before
+    // the SPA fallback so bucket/key paths under the prefix are matched here.
+    if state.config.server.s3_gateway_enabled {
+        app = app.merge(s3::gateway_routes(&state.config.server.s3_gateway_prefix));
+    }
+
+    app.fallback_service(spa_fallback)
         .layer(DefaultBodyLimit::max(MAX_BODY_SIZE))
         .layer(trace_layer)
         .layer(CorsLayer::permissive())

@@ -50,9 +50,10 @@ async fn main() -> Result<()> {
 
     // Initialize storage
     let storage = Arc::new(build_storage(&config.storage).await?);
-    let (file_index, chunk_index) = build_index(&config.storage).await?;
+    let (file_index, chunk_index, s3_index) = build_index(&config.storage).await?;
     let file_index = Arc::new(file_index);
     let chunk_index = Arc::new(chunk_index);
+    let s3_index = Arc::new(s3_index);
 
     let jwks = Arc::new(JwksCache::new(
         config.auth.oidc_issuers.clone(),
@@ -76,6 +77,7 @@ async fn main() -> Result<()> {
         storage,
         file_index,
         chunk_index,
+        s3_index,
         config: Arc::new(config.clone()),
         jwks,
         fetch_token_secret,
