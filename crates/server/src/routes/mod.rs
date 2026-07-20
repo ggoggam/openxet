@@ -71,7 +71,9 @@ pub fn build_router(state: AppState) -> Router {
         // S3 gateway management: register a friendly (bucket, key) name for an
         // already-uploaded file. The read gateway itself is mounted separately
         // (below) under the configured S3 prefix.
-        .route("/v1/s3/objects", post(s3::register_object));
+        .route("/v1/s3/objects", post(s3::register_object))
+        // Mint a SigV4 access-key/secret for signing gateway requests.
+        .route("/v1/s3/credentials", post(s3::create_credential));
 
     let frontend_dir = &state.config.server.frontend_dir;
     let spa_fallback = ServeDir::new(frontend_dir)

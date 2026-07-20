@@ -185,6 +185,19 @@ pub async fn get_object(
         .map_err(|e| S3Error::internal(e.to_string()))?
         .ok_or_else(|| S3Error::no_such_key(&key))?;
 
+    // Empty objects have no reconstructable file behind them (PutObject skips
+    // xorb/shard creation for zero bytes), so short-circuit before file_terms.
+    if obj.size == 0 {
+        let mut builder = Response::builder().status(StatusCode::OK);
+        for (name, value) in object_headers(&obj) {
+            builder = builder.header(name, value);
+        }
+        return builder
+            .header(header::CONTENT_LENGTH, 0)
+            .body(Body::empty())
+            .map_err(|e| S3Error::internal(e.to_string()));
+    }
+
     let terms = file_terms(&state, &obj.file_hash)
         .await
         .map_err(|e| from_app_error(e, &key))?;

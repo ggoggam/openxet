@@ -26,7 +26,6 @@ type HmacSha256 = Hmac<Sha256>;
 /// request acts as (anonymous requests, allowed only when auth is disabled,
 /// act as `"default"`, matching [`crate::auth::jwt::Claims::owner`]).
 pub struct S3Auth {
-    #[allow(dead_code)] // owner is used by write paths in later phases
     pub owner_id: String,
 }
 
