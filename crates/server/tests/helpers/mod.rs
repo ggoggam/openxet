@@ -158,11 +158,14 @@ impl TestServer {
     #[allow(dead_code)]
     pub async fn seed_s3_credential(&self, access_key_id: &str, secret_key: &str, owner: &str) {
         self.s3_index
-            .put_credential(&openxet_server::storage::S3Credential {
-                access_key_id: access_key_id.to_string(),
-                secret_key: secret_key.to_string(),
-                owner_id: owner.to_string(),
-            })
+            .put_credential(
+                &openxet_server::storage::S3Credential {
+                    access_key_id: access_key_id.to_string(),
+                    secret_key: secret_key.to_string(),
+                    owner_id: owner.to_string(),
+                },
+                0,
+            )
             .await
             .unwrap();
     }

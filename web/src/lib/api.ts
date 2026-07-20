@@ -439,3 +439,125 @@ export async function runGc(graceSeconds?: number): Promise<GcReport> {
   const res = await authFetch(`/v1/gc${q}`, { method: "POST" });
   return res.json();
 }
+
+// ─── S3 gateway management (JSON) ───────────────────────────────────────────
+
+export interface S3Info {
+  /** Whether the S3 data plane (GetObject/PutObject/…) is mounted. */
+  enabled: boolean;
+  /** Path prefix the gateway is mounted under, e.g. `/s3`. */
+  prefix: string;
+  /** Endpoint URL S3 clients target (`--endpoint-url`); absolute when the
+   * server has a public URL, otherwise just the prefix. */
+  endpoint: string;
+}
+
+export interface S3BucketSummary {
+  bucket: string;
+  object_count: number;
+  /** Sum of the objects' logical sizes in bytes. */
+  total_size: number;
+}
+
+export interface S3ObjectItem {
+  bucket: string;
+  key: string;
+  /** The content-addressed file this name resolves to. */
+  file_hash: string;
+  size: number;
+  etag: string;
+  owner_id: string;
+  /** Registration time in unix seconds. */
+  last_modified: number;
+}
+
+export interface S3CredentialSummary {
+  access_key_id: string;
+  owner_id: string;
+  /** Mint time in unix seconds (0 for credentials minted before timestamps). */
+  created_at: number;
+}
+
+export interface CreateCredentialResult {
+  access_key_id: string;
+  /** Shown once, at creation; not recoverable afterward. */
+  secret_access_key: string;
+  owner_id: string;
+}
+
+/** Gateway connection details for the management UI. */
+export function fetchS3Info(): Promise<S3Info> {
+  return authJson(`/v1/s3/info`);
+}
+
+/** Distinct buckets with per-bucket object counts and total logical size. */
+export async function listS3Buckets(): Promise<S3BucketSummary[]> {
+  const res = await authJson<{ buckets: S3BucketSummary[] }>(`/v1/s3/buckets`);
+  return res.buckets;
+}
+
+/** Object names within a bucket (cursor-paginated, ordered by key). */
+export function listS3Objects(params: {
+  bucket: string;
+  prefix?: string;
+  cursor?: string;
+  limit?: number;
+}): Promise<Page<S3ObjectItem>> {
+  const q = new URLSearchParams({ bucket: params.bucket });
+  if (params.prefix) q.set("prefix", params.prefix);
+  if (params.cursor) q.set("cursor", params.cursor);
+  if (params.limit != null) q.set("limit", String(params.limit));
+  return authJson(`/v1/s3/objects?${q.toString()}`);
+}
+
+/** Register a friendly `(bucket, key)` name for an already-uploaded file. */
+export async function registerS3Object(params: {
+  bucket: string;
+  key: string;
+  file_hash: string;
+}): Promise<{ bucket: string; key: string; file_hash: string; size: number; etag: string }> {
+  const res = await authFetch(`/v1/s3/objects`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(params),
+  });
+  return res.json();
+}
+
+/** Remove an object name. Does not release the underlying file's ownership
+ * claim (matches the gateway's DeleteObject; per-name refcounting is deferred). */
+export async function deleteS3Object(
+  bucket: string,
+  key: string,
+): Promise<{ deleted: boolean }> {
+  const q = new URLSearchParams({ bucket, key });
+  const res = await authFetch(`/v1/s3/objects?${q.toString()}`, {
+    method: "DELETE",
+  });
+  return res.json();
+}
+
+/** All minted credentials without their secrets, newest first. */
+export async function listS3Credentials(): Promise<S3CredentialSummary[]> {
+  const res = await authJson<{ items: S3CredentialSummary[] }>(
+    `/v1/s3/credentials`,
+  );
+  return res.items;
+}
+
+/** Mint a SigV4 access-key/secret pair. The secret is returned once here. */
+export async function createS3Credential(): Promise<CreateCredentialResult> {
+  const res = await authFetch(`/v1/s3/credentials`, { method: "POST" });
+  return res.json();
+}
+
+/** Revoke a credential by access-key id. */
+export async function deleteS3Credential(
+  accessKeyId: string,
+): Promise<{ deleted: boolean }> {
+  const res = await authFetch(
+    `/v1/s3/credentials/${encodeURIComponent(accessKeyId)}`,
+    { method: "DELETE" },
+  );
+  return res.json();
+}

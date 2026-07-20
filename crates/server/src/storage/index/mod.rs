@@ -120,6 +120,27 @@ pub struct S3Credential {
     pub owner_id: String,
 }
 
+/// A credential without its secret, for management listings. The secret is
+/// shown once at creation and is never returned by the listing endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct S3CredentialSummary {
+    pub access_key_id: String,
+    pub owner_id: String,
+    /// Mint time in unix seconds (`0` for credentials created before the
+    /// timestamp column existed).
+    pub created_at: i64,
+}
+
+/// One row of the S3 gateway bucket listing: a distinct bucket with its object
+/// count and total logical size, aggregated from the object-name index.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BucketSummary {
+    pub bucket: String,
+    pub object_count: u64,
+    /// Sum of the objects' logical sizes in bytes.
+    pub total_size: u64,
+}
+
 /// One row of the paginated xorb listing, sourced from the layout index (the
 /// set of xorbs known to dedup), not an object-store scan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -474,6 +495,15 @@ impl S3IndexBackend {
         }
     }
 
+    /// Distinct buckets with per-bucket object counts and total logical size,
+    /// ordered by bucket name.
+    pub async fn list_buckets(&self) -> Result<Vec<BucketSummary>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.list_buckets().await,
+            Self::Postgres(i) => i.list_buckets().await,
+        }
+    }
+
     pub async fn get_credential(
         &self,
         access_key_id: &str,
@@ -484,10 +514,30 @@ impl S3IndexBackend {
         }
     }
 
-    pub async fn put_credential(&self, cred: &S3Credential) -> Result<(), StorageError> {
+    pub async fn put_credential(
+        &self,
+        cred: &S3Credential,
+        created_at: i64,
+    ) -> Result<(), StorageError> {
         match self {
-            Self::Sqlite(i) => i.put_credential(cred).await,
-            Self::Postgres(i) => i.put_credential(cred).await,
+            Self::Sqlite(i) => i.put_credential(cred, created_at).await,
+            Self::Postgres(i) => i.put_credential(cred, created_at).await,
+        }
+    }
+
+    /// All credentials without their secrets, newest first.
+    pub async fn list_credentials(&self) -> Result<Vec<S3CredentialSummary>, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.list_credentials().await,
+            Self::Postgres(i) => i.list_credentials().await,
+        }
+    }
+
+    /// Revoke a credential. Returns whether a row was removed.
+    pub async fn delete_credential(&self, access_key_id: &str) -> Result<bool, StorageError> {
+        match self {
+            Self::Sqlite(i) => i.delete_credential(access_key_id).await,
+            Self::Postgres(i) => i.delete_credential(access_key_id).await,
         }
     }
 }

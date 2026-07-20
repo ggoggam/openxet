@@ -10,6 +10,7 @@ import { FileDetailPage } from "@/pages/file-detail";
 import { UploadPage } from "@/pages/upload";
 import { XorbsPage } from "@/pages/xorbs";
 import { StoragePage } from "@/pages/storage";
+import { S3Page } from "@/pages/s3";
 
 const rootRoute = createRootRoute({
   component: () => (
@@ -55,6 +56,12 @@ const storageRoute = createRoute({
   component: StoragePage,
 });
 
+const s3Route = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/s3",
+  component: S3Page,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   filesRoute,
@@ -62,6 +69,7 @@ const routeTree = rootRoute.addChildren([
   uploadRoute,
   xorbsRoute,
   storageRoute,
+  s3Route,
 ]);
 
 export const router = createRouter({ routeTree });
