@@ -1,4 +1,5 @@
 use axum::extract::FromRequestParts;
+use axum::http::HeaderMap;
 use axum::http::request::Parts;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
@@ -11,11 +12,11 @@ use super::jwt::{Claims, Scope, validate_token};
 /// Extract the bearer token from the `Authorization` header.
 ///
 /// Fetch URLs in reconstruction responses are self-authenticating (presigned
-/// object-store URLs, or the unauthenticated filesystem fallback route), so the
-/// server no longer accepts a credential via a `?token=` query parameter.
-fn extract_bearer_token(parts: &Parts) -> Result<&str, AppError> {
-    let header = parts
-        .headers
+/// object-store URLs, or HMAC-signed URLs to the filesystem fallback route), so
+/// the server does not accept a bearer credential via a `?token=` query
+/// parameter.
+fn extract_bearer_token(headers: &HeaderMap) -> Result<&str, AppError> {
+    let header = headers
         .get("authorization")
         .ok_or_else(|| AppError::Unauthorized("missing authorization header".to_string()))?;
     let header = header
@@ -123,7 +124,11 @@ async fn verify_token(state: &AppState, token: &str) -> Result<Claims, AppError>
 
 /// Authenticate the request and check it has the required scope. When auth is
 /// disabled in config, every request passes with write scope.
-async fn authorize(parts: &Parts, state: &AppState, required: Scope) -> Result<Claims, AppError> {
+pub(crate) async fn authorize(
+    headers: &HeaderMap,
+    state: &AppState,
+    required: Scope,
+) -> Result<Claims, AppError> {
     if !state.config.auth.enabled {
         return Ok(Claims {
             scope: Scope::Write,
@@ -133,7 +138,7 @@ async fn authorize(parts: &Parts, state: &AppState, required: Scope) -> Result<C
         });
     }
 
-    let token = extract_bearer_token(parts)?.to_string();
+    let token = extract_bearer_token(headers)?.to_string();
     let claims = verify_token(state, &token).await?;
 
     // HF xet spec: valid token with insufficient scope is 403, not 401.
@@ -156,7 +161,9 @@ impl FromRequestParts<AppState> for RequireRead {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        Ok(RequireRead(authorize(parts, state, Scope::Read).await?))
+        Ok(RequireRead(
+            authorize(&parts.headers, state, Scope::Read).await?,
+        ))
     }
 }
 
@@ -167,6 +174,8 @@ impl FromRequestParts<AppState> for RequireWrite {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
-        Ok(RequireWrite(authorize(parts, state, Scope::Write).await?))
+        Ok(RequireWrite(
+            authorize(&parts.headers, state, Scope::Write).await?,
+        ))
     }
 }

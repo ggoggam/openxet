@@ -114,6 +114,12 @@ pub struct AuthConfig {
 
     /// How long a fetched JWKS is trusted before it is refetched, in seconds.
     pub jwks_ttl_seconds: u64,
+
+    /// Secret for signing xorb fetch URLs on backends that cannot presign
+    /// (filesystem). Unset means a random key per process: fine for a single
+    /// server, but every replica behind a load balancer must share one, and a
+    /// restart invalidates outstanding URLs (they live `shard_key_ttl_seconds`).
+    pub xorb_url_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -182,6 +188,7 @@ impl Default for AuthConfig {
             oidc_issuers: Vec::new(),
             oidc_audience: None,
             jwks_ttl_seconds: 900,
+            xorb_url_secret: None,
         }
     }
 }
@@ -306,6 +313,11 @@ impl AppConfig {
             && let Ok(ttl) = ttl.parse::<u64>()
         {
             self.auth.jwks_ttl_seconds = ttl;
+        }
+        if let Ok(v) = std::env::var("OPENXET_XORB_URL_SECRET")
+            && !v.is_empty()
+        {
+            self.auth.xorb_url_secret = Some(v);
         }
         if let Ok(v) = std::env::var("OPENXET_GC_GRACE_SECONDS")
             && let Ok(v) = v.parse::<u64>()

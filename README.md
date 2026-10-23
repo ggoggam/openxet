@@ -89,7 +89,10 @@ same variables apply if you run the binary directly:
 | `OPENXET_S3_ALLOW_HTTP` | — | `true` |
 
 For authentication, configure OIDC issuers (`OPENXET_OIDC_ISSUERS`); clients then
-present bearer tokens from that provider. Leave `OPENXET_AUTH_ENABLED=false`
+present bearer tokens from that provider. On the filesystem backend,
+reconstruction responses carry HMAC-signed, expiring xorb fetch URLs; set
+`OPENXET_XORB_URL_SECRET` to the same value on every replica so a URL signed by
+one verifies on another. Leave `OPENXET_AUTH_ENABLED=false`
 (the mise default) for local/dev use.
 
 ### Running with Docker
@@ -151,7 +154,7 @@ wasm ┤
 | `GET` | `/v1/reconstructions/{file_id}` | File reconstruction (supports Range header) |
 | `GET` | `/v2/reconstructions/{file_id}` | V2 file reconstruction — per-xorb fetch entries; preferred by current xet-core clients |
 | `GET` | `/v1/chunks/default-merkledb/{hash}` | Global chunk deduplication query |
-| `GET` | `/v1/xorbs/default/{hash}` | Download a xorb |
+| `GET` | `/v1/xorbs/default/{hash}` | Download a xorb (filesystem backend only; needs a signed fetch URL from a reconstruction response, or a bearer token) |
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
 

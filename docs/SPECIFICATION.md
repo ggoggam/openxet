@@ -66,7 +66,7 @@ Retrieve file reconstruction metadata for downloading a file.
 **Implementation notes:**
 - Look up file_id in the file index → find the shard containing this file's reconstruction
 - Deserialize the shard's FileInfo section to build the terms list
-- For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own public `/v1/xorbs/default/{hash}` route. Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
+- For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own `/v1/xorbs/default/{hash}` route with an HMAC-signed, expiring query string scoped to that byte range (see §5). Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
 - For range requests: compute which terms/chunks overlap the requested byte range, set `offset_into_first_range` accordingly, trim terms
 
 ### 3.2 GET /v2/reconstructions/{file_id}
@@ -322,16 +322,22 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
   `aud`. Any valid token from an allowed issuer currently grants full
   read/write — issuance is the access-control point.
 - **Fetch URLs** on reconstruction `fetch_info` entries are self-authenticating
-  and carry no OpenXet credential: cloud backends return a presigned
-  object-store URL, and the filesystem backend returns the server's own
-  **unauthenticated** `GET /v1/xorbs/default/{hash}` route (content-addressed
-  hash is the only handle). The server no longer mints fetch-URL tokens.
+  because xet-core fetches them with no `Authorization` header: cloud backends
+  return a presigned object-store URL, and the filesystem backend returns the
+  server's own `GET /v1/xorbs/default/{hash}?r={start}-{end}&exp={unix}&sig={hex}`
+  route. `sig` is HMAC-SHA256 over the xorb hash, the inclusive byte span, and
+  the expiry (`auth.shard_key_ttl_seconds` from issue), keyed by
+  `auth.xorb_url_secret` (`OPENXET_XORB_URL_SECRET`; random per process when
+  unset, so set it when running replicas). A request must send a `Range`
+  inside the signed span. Unsigned, tampered, or expired URLs get `401`; a
+  `Range` outside the span gets `403`. The `sig` value is redacted from
+  request logs.
 - **Development:** `auth.enabled = false` (or `OPENXET_AUTH_ENABLED=false`)
   skips all token checks; the server logs a loud warning.
 
 Write scope supersedes read; middleware validates the Bearer `Authorization`
-header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` is the one
-unauthenticated route (the filesystem fetch-URL fallback).
+header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` accepts
+either a signed fetch URL or a bearer token.
 
 ---
 
@@ -462,7 +468,7 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 rou
 11. Auth middleware (JWT generation + validation)
 12. `POST /v1/xorbs/default/{hash}` — xorb upload with validation
 13. `POST /v1/shards` — shard upload with xorb existence checks and verification hash validation
-14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned (cloud) / public-route (filesystem) fetch URLs
+14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned (cloud) / HMAC-signed (filesystem) fetch URLs
 15. `GET /v1/chunks/default-merkledb/{hash}` — global dedup with HMAC-protected shard responses
 16. Error handling (retryable vs non-retryable), rate limiting
 

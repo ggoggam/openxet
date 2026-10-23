@@ -17,4 +17,9 @@ pub struct AppState {
     /// presigned / unauthenticated); it backs the HS256 path used by tests and
     /// trusted/dev setups.
     pub fetch_token_secret: Arc<str>,
+    /// HMAC key for the signed xorb fetch URLs handed out on backends that
+    /// cannot presign (see [`crate::auth::fetch_url`]). Kept separate from
+    /// `fetch_token_secret` so a URL signature can never double as a JWT
+    /// signature or vice versa.
+    pub xorb_url_key: Arc<[u8]>,
 }

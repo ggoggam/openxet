@@ -72,6 +72,15 @@ async fn main() -> Result<()> {
         hex::encode(bytes).into()
     };
 
+    let xorb_url_key: Arc<[u8]> = match &config.auth.xorb_url_secret {
+        Some(secret) => secret.as_bytes().into(),
+        None => {
+            use rand::Rng;
+            let bytes: [u8; 32] = rand::thread_rng().r#gen();
+            bytes.into()
+        }
+    };
+
     let state = AppState {
         storage,
         file_index,
@@ -79,6 +88,7 @@ async fn main() -> Result<()> {
         config: Arc::new(config.clone()),
         jwks,
         fetch_token_secret,
+        xorb_url_key,
     };
 
     if let Some(interval_seconds) = config.gc.interval_seconds {

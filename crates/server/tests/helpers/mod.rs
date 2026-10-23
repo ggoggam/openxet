@@ -115,6 +115,7 @@ impl TestServer {
             // Tests mint HS256 tokens against this known secret, exercising
             // the same verify path the server's self-minted fetch tokens use.
             fetch_token_secret: TEST_SECRET.into(),
+            xorb_url_key: b"test-xorb-url-key".as_slice().into(),
         };
 
         let app = build_router(state);

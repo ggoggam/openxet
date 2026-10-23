@@ -21,14 +21,17 @@ use crate::state::AppState;
 // payload-specific message, not axum's generic body-limit 413.
 const MAX_BODY_SIZE: usize = 69 * 1024 * 1024;
 
-/// Replace any `token=…` value in a query string with a placeholder as a
-/// defensive measure so credentials never land in request logs.
+/// Replace credential-bearing query values (`token=…`, and the `sig=…` of a
+/// signed xorb fetch URL) with a placeholder so they never land in request
+/// logs, where anyone with log access could replay them.
 fn redact_query(query: &str) -> String {
     query
         .split('&')
         .map(|kv| {
             if kv.starts_with("token=") {
                 "token=REDACTED"
+            } else if kv.starts_with("sig=") {
+                "sig=REDACTED"
             } else {
                 kv
             }
@@ -131,4 +134,19 @@ pub fn build_router(state: AppState) -> Router {
         .layer(trace_layer)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_query;
+
+    #[test]
+    fn redacts_credentials_in_query() {
+        assert_eq!(
+            redact_query("r=0-9&exp=100&sig=deadbeef"),
+            "r=0-9&exp=100&sig=REDACTED"
+        );
+        assert_eq!(redact_query("token=abc&limit=5"), "token=REDACTED&limit=5");
+        assert_eq!(redact_query(""), "");
+    }
 }
