@@ -197,7 +197,8 @@ Upload a shard (register files).
 **Implementation notes:**
 - Parse shard header (verify tag + version=2, footer_size=0)
 - Parse FileInfo section: for each file, read FileDataSequenceHeader, entries, verification entries, metadata ext
-- Validate verification entries: for each term, recompute verification hash from stored xorb chunk hashes and compare
+- Require verification entries on every file (400 otherwise), and for each term recompute the verification hash from the stored xorb chunk hashes and compare. Computing one takes the term's raw chunk hashes, so it doubles as proof that the uploader holds the content: without it, a file that is one whole xorb has a file hash computable from the xorb hash alone, and anyone who knew a xorb hash could register a file over it and gain an ownership claim that reads it. Errors never echo a computed hash.
+- Check each term's `unpacked_segment_bytes` against the sizes of its chunks
 - Validate that all referenced xorbs exist in storage
 - Parse CAS Info section: register chunk→xorb mappings for future dedup queries
 - Index file_hash → shard for future reconstruction lookups

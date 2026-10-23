@@ -80,13 +80,22 @@ async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Resul
     let shard = MDBMinimalShard::from_reader(&mut Cursor::new(&body[..]), true, true)
         .map_err(|e| AppError::BadRequest(format!("invalid shard: {e}")))?;
 
-    // Validate every file block: referenced xorbs must exist, verification
-    // hashes (when present) must match, and — critically — the declared
+    // Validate every file block: referenced xorbs must exist, every term must
+    // carry a matching verification hash and unpacked length, and the declared
     // file_hash must equal the hash recomputed from the actual chunk content.
-    // Without that last check a writer could register arbitrary bytes under any
-    // file hash and poison later reconstructions (the core CAS invariant).
-    // Chunk hashes come from the stored xorbs' metadata footers, which were
-    // themselves verified against the chunk data at xorb upload time.
+    // Without the file hash check a writer could register arbitrary bytes
+    // under any file hash and poison later reconstructions (the core CAS
+    // invariant). Chunk hashes come from the stored xorbs' metadata footers,
+    // which were themselves verified against the chunk data at xorb upload
+    // time.
+    //
+    // Verification hashes are also the proof of possession: computing one
+    // takes the raw chunk hashes of the term, which only someone holding the
+    // content has. Without them, a file that is one whole xorb has a file
+    // hash computable from the xorb hash alone, so anyone who knew a xorb
+    // hash could register a file over it, gain an ownership claim, and read
+    // another tenant's bytes. Error messages therefore never echo a computed
+    // hash back.
     let mut xorb_meta_cache: HashMap<String, Arc<XorbObjectInfoV1>> = HashMap::new();
 
     // (file_hash, logical_bytes) per validated file, for ownership accounting.
@@ -99,6 +108,12 @@ async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Resul
             return Err(AppError::BadRequest(
                 "file info block has no entries".to_string(),
             ));
+        }
+        if !file_view.contains_verification() {
+            return Err(AppError::BadRequest(format!(
+                "file {} has no verification entries; upload shards must carry them",
+                file_view.file_hash().hex()
+            )));
         }
 
         // (chunk_hash, size) for the whole file, in term order, to rebuild the
@@ -143,19 +158,11 @@ async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Resul
 
             let chunk_hashes = &info.chunk_hashes[chunk_start..chunk_end];
 
-            // Validate the per-term verification hash if the shard carries one.
-            if file_view.contains_verification() {
-                let computed = range_hash_from_chunks(chunk_hashes);
-                let expected = file_view.verification(term_idx).range_hash;
-
-                if computed != expected {
-                    return Err(AppError::BadRequest(format!(
-                        "verification hash mismatch for file {} term {term_idx}: computed={}, expected={}",
-                        file_view.file_hash().hex(),
-                        computed.hex(),
-                        expected.hex()
-                    )));
-                }
+            if range_hash_from_chunks(chunk_hashes) != file_view.verification(term_idx).range_hash {
+                return Err(AppError::BadRequest(format!(
+                    "verification hash mismatch for file {} term {term_idx}",
+                    file_view.file_hash().hex()
+                )));
             }
 
             let mut prev_unpacked = if chunk_start == 0 {
@@ -163,19 +170,29 @@ async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Resul
             } else {
                 info.unpacked_chunk_offsets[chunk_start - 1]
             };
+            let term_start = prev_unpacked;
             for k in chunk_start..chunk_end {
                 let unpacked_end = info.unpacked_chunk_offsets[k];
                 file_chunks.push((info.chunk_hashes[k], (unpacked_end - prev_unpacked) as u64));
                 prev_unpacked = unpacked_end;
+            }
+
+            // Reconstruction and range reads trust the term's declared length.
+            if (prev_unpacked - term_start) != entry.unpacked_segment_bytes {
+                return Err(AppError::BadRequest(format!(
+                    "file {} term {term_idx} declares {} unpacked bytes, but its chunks hold {}",
+                    file_view.file_hash().hex(),
+                    entry.unpacked_segment_bytes,
+                    prev_unpacked - term_start
+                )));
             }
         }
 
         let computed_file_hash = file_hash(&file_chunks);
         if computed_file_hash != file_view.file_hash() {
             return Err(AppError::BadRequest(format!(
-                "file hash mismatch: declared={}, computed={}",
-                file_view.file_hash().hex(),
-                computed_file_hash.hex()
+                "file hash mismatch for declared file {}",
+                file_view.file_hash().hex()
             )));
         }
 
