@@ -138,3 +138,30 @@ async fn auth_disabled_serves_unsigned_xorbs() {
     let bare = format!("{}/v1/xorbs/default/{hash}", server.base_url);
     assert_eq!(get(&server, &bare, Some((start, end))).await, 206);
 }
+
+#[tokio::test]
+async fn range_past_end_of_xorb_is_416_not_500() {
+    let server = TestServer::start().await;
+    let (_, _, end, hash) = signed_fetch(&server).await;
+    let url = format!("{}/v1/xorbs/default/{hash}", server.base_url);
+    let get = |range: String| {
+        server
+            .client
+            .get(&url)
+            .bearer_auth(server.admin_token())
+            .header("range", range)
+            .send()
+    };
+
+    let past = end + 1_000_000;
+    assert_eq!(
+        get(format!("bytes={past}-{}", past + 10))
+            .await
+            .unwrap()
+            .status(),
+        416
+    );
+    // An end past the xorb clamps, per HTTP range semantics.
+    let resp = get(format!("bytes=0-{past}")).await.unwrap();
+    assert_eq!(resp.status(), 206);
+}

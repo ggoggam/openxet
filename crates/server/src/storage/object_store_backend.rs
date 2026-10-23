@@ -1,11 +1,10 @@
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Duration;
 
 use bytes::Bytes;
-use object_store::ObjectStore;
 use object_store::path::Path as ObjectPath;
 use object_store::signer::Signer;
+use object_store::{GetOptions, GetRange, ObjectStore};
 use reqwest::Method;
 
 use super::backend::{StorageBackend, StoredObject, validate_hash};
@@ -112,14 +111,28 @@ impl StorageBackend for ObjectStoreBackend {
         end: u64,
     ) -> Result<Bytes, StorageError> {
         validate_hash(hash)?;
-        let range = Range {
-            start: start as usize,
-            end: end as usize,
+        let path = Self::xorb_path(hash);
+        // A bounded GetRange clamps an end past the object to its length, as
+        // HTTP range semantics require, where `get_range` would error.
+        let options = GetOptions {
+            range: Some(GetRange::Bounded(start as usize..end as usize)),
+            ..Default::default()
         };
-        self.store
-            .get_range(&Self::xorb_path(hash), range)
-            .await
-            .map_err(map_error)
+        match self.store.get_opts(&path, options).await {
+            Ok(result) => result.bytes().await.map_err(map_error),
+            Err(err @ object_store::Error::NotFound { .. }) => Err(map_error(err)),
+            Err(err) => {
+                // A start at or past the end is the caller's mistake, not a
+                // store failure; stores report it as an opaque error, so
+                // confirm against the object's size.
+                if let Ok(meta) = self.store.head(&path).await
+                    && start as usize >= meta.size
+                {
+                    return Err(StorageError::RangeNotSatisfiable);
+                }
+                Err(map_error(err))
+            }
+        }
     }
 
     async fn put_xorb(&self, hash: &str, data: Bytes) -> Result<bool, StorageError> {
@@ -267,6 +280,26 @@ mod tests {
 
         let range = backend.get_xorb_range(TEST_HASH, 4, 10).await.unwrap();
         assert_eq!(range.as_ref(), b"456789");
+    }
+
+    #[tokio::test]
+    async fn test_get_xorb_range_past_end() {
+        let backend = make_backend();
+        backend
+            .put_xorb(TEST_HASH, Bytes::from_static(b"0123456789"))
+            .await
+            .unwrap();
+
+        // End past the object clamps to its length.
+        let range = backend.get_xorb_range(TEST_HASH, 6, 1_000).await.unwrap();
+        assert_eq!(range.as_ref(), b"6789");
+
+        // Start past the object is unsatisfiable, not a store failure.
+        let result = backend.get_xorb_range(TEST_HASH, 10, 20).await;
+        assert!(matches!(result, Err(StorageError::RangeNotSatisfiable)));
+
+        let result = backend.get_xorb_range(&"0".repeat(64), 0, 1).await;
+        assert!(matches!(result, Err(StorageError::NotFound(_))));
     }
 
     #[tokio::test]
