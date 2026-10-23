@@ -47,17 +47,25 @@ impl TestServer {
     /// `postgres_url`. Used by the Postgres-gated integration test.
     #[allow(dead_code)]
     pub async fn start_with_postgres(postgres_url: &str) -> Self {
-        Self::start_configured(true, "sqlite", Some(postgres_url.to_string())).await
+        Self::start_configured(true, "sqlite", Some(postgres_url.to_string()), 0).await
+    }
+
+    /// Start a server that enforces a GC grace floor (the others use 0 so
+    /// tests can collect immediately).
+    #[allow(dead_code)]
+    pub async fn start_with_min_gc_grace(min_grace_seconds: u64) -> Self {
+        Self::start_configured(true, "sqlite", None, min_grace_seconds).await
     }
 
     async fn start_inner(auth_enabled: bool) -> Self {
-        Self::start_configured(auth_enabled, "sqlite", None).await
+        Self::start_configured(auth_enabled, "sqlite", None, 0).await
     }
 
     async fn start_configured(
         auth_enabled: bool,
         local_index_backend: &str,
         postgres_url: Option<String>,
+        min_gc_grace_seconds: u64,
     ) -> Self {
         let index_backend = if postgres_url.is_some() {
             "postgres".to_string()
@@ -93,7 +101,10 @@ impl TestServer {
                 shard_key_ttl_seconds: 3600,
                 ..Default::default()
             },
-            gc: Default::default(),
+            gc: openxet_server::config::GcConfig {
+                min_grace_seconds: min_gc_grace_seconds,
+                ..Default::default()
+            },
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());

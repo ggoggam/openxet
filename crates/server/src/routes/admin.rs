@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{RequireAdmin, RequireWrite};
+use crate::auth::RequireAdmin;
 use crate::error::AppError;
 use crate::gc::{GcReport, run_gc};
 use crate::state::AppState;
@@ -12,23 +12,28 @@ use crate::storage::{FileIndex, OwnerUsage, StorageBackend};
 
 #[derive(Debug, Deserialize)]
 pub struct GcParams {
-    /// Override the configured grace period for this pass. `0` collects
-    /// everything unreachable regardless of age — only safe when no uploads
-    /// are in flight.
+    /// Override the configured grace period for this pass. Must be at least
+    /// `gc.min_grace_seconds`; anything younger may be an upload in flight.
     pub grace_seconds: Option<u64>,
 }
 
-/// POST /v1/gc — run one mark-and-sweep pass and return what it did.
+/// POST /v1/gc — run one mark-and-sweep pass and return what it did. Deletes
+/// data across every tenant, so admin only.
 pub async fn post_gc(
     State(state): State<AppState>,
-    _auth: RequireWrite,
+    _auth: RequireAdmin,
     Query(params): Query<GcParams>,
 ) -> Result<Json<GcReport>, AppError> {
-    let grace = Duration::from_secs(
-        params
-            .grace_seconds
-            .unwrap_or(state.config.gc.grace_seconds),
-    );
+    let grace_seconds = params
+        .grace_seconds
+        .unwrap_or(state.config.gc.grace_seconds);
+    let min = state.config.gc.min_grace_seconds;
+    if grace_seconds < min {
+        return Err(AppError::BadRequest(format!(
+            "grace_seconds must be at least {min} (gc.min_grace_seconds)"
+        )));
+    }
+    let grace = Duration::from_secs(grace_seconds);
     let report = run_gc(&state, grace).await?;
     Ok(Json(report))
 }

@@ -146,6 +146,12 @@ pub struct GcConfig {
     /// young unreferenced xorb is usually an upload in flight.
     pub grace_seconds: u64,
 
+    /// Floor for `grace_seconds`, including the `?grace_seconds=` override on
+    /// `POST /v1/gc`: an override below it is rejected, and so is a configured
+    /// `grace_seconds` below it at startup. Keeps a GC call from deleting
+    /// xorbs a concurrent upload has sent but not yet registered in a shard.
+    pub min_grace_seconds: u64,
+
     /// When set, run a GC pass automatically every this many seconds. Unset
     /// (the default) means GC only runs when POST /v1/gc is called.
     pub interval_seconds: Option<u64>,
@@ -155,6 +161,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             grace_seconds: 24 * 60 * 60,
+            min_grace_seconds: 60 * 60,
             interval_seconds: None,
         }
     }
@@ -236,6 +243,14 @@ impl AppConfig {
 
         // Environment variable overrides (highest priority)
         config.apply_env_overrides();
+
+        if config.gc.grace_seconds < config.gc.min_grace_seconds {
+            anyhow::bail!(
+                "gc.grace_seconds ({}) is below gc.min_grace_seconds ({})",
+                config.gc.grace_seconds,
+                config.gc.min_grace_seconds
+            );
+        }
 
         Ok(config)
     }
@@ -359,6 +374,11 @@ impl AppConfig {
             && let Ok(v) = v.parse::<u64>()
         {
             self.gc.grace_seconds = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_GC_MIN_GRACE_SECONDS")
+            && let Ok(v) = v.parse::<u64>()
+        {
+            self.gc.min_grace_seconds = v;
         }
         if let Ok(v) = std::env::var("OPENXET_GC_INTERVAL_SECONDS")
             && let Ok(v) = v.parse::<u64>()

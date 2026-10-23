@@ -345,7 +345,7 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
 Reads are scoped to ownership claims: a non-admin caller can reconstruct
 (`/v1` and `/v2`), inspect (`GET /v1/files/{id}`), or list (`GET /v1/files`)
 only files its `sub` holds a claim on; other files answer `404`. Cross-tenant
-endpoints (`GET /v1/xorbs`, `GET /v1/accounting`) and fetching a
+endpoints (`GET /v1/xorbs`, `GET /v1/accounting`, `POST /v1/gc`) and fetching a
 xorb by hash with a bearer token instead of a signed URL need admin scope.
 
 Admin scope supersedes write, which supersedes read; middleware validates the Bearer `Authorization`

@@ -177,7 +177,7 @@ Not part of the Xet wire protocol — these manage the data's lifecycle:
 | `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs (owners and admins only) |
 | `DELETE` | `/v1/files/{file_id}` | Release the caller's ownership claim on a file; the file is removed once its last claim is released |
 | `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count (admin) |
-| `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (optional `?grace_seconds=` override); returns a report of what was deleted |
+| `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (admin; optional `?grace_seconds=` override, no lower than `gc.min_grace_seconds`); returns a report of what was deleted |
 | `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio (admin) |
 
 **Cursor pagination.** List endpoints (`/v1/files`, `/v1/xorbs`) take `?limit=`
@@ -205,8 +205,11 @@ deleted — including its dedup index entries. Unreferenced objects younger than
 `gc.grace_seconds` (default 24h) are never collected, because clients upload
 xorbs *before* registering them in a shard; keep the grace period comfortably
 above your longest plausible upload session. GC runs on demand via `POST
-/v1/gc`, or periodically when `gc.interval_seconds`
-(`OPENXET_GC_INTERVAL_SECONDS`) is set.
+/v1/gc` (admin scope), or periodically when `gc.interval_seconds`
+(`OPENXET_GC_INTERVAL_SECONDS`) is set. `gc.min_grace_seconds`
+(`OPENXET_GC_MIN_GRACE_SECONDS`, default 1h) is a floor: a `?grace_seconds=`
+override below it is rejected with 400, and the server refuses to start with a
+configured `gc.grace_seconds` below it.
 
 ### Storage Layout
 
