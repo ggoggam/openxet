@@ -21,14 +21,17 @@ use crate::state::AppState;
 // payload-specific message, not axum's generic body-limit 413.
 const MAX_BODY_SIZE: usize = 69 * 1024 * 1024;
 
-/// Replace any `token=…` value in a query string with a placeholder as a
-/// defensive measure so credentials never land in request logs.
+/// Replace credential-bearing query values (`token=…`, and the `sig=…` of a
+/// signed xorb fetch URL) with a placeholder so they never land in request
+/// logs, where anyone with log access could replay them.
 fn redact_query(query: &str) -> String {
     query
         .split('&')
         .map(|kv| {
             if kv.starts_with("token=") {
                 "token=REDACTED"
+            } else if kv.starts_with("sig=") {
+                "sig=REDACTED"
             } else {
                 kv
             }
@@ -45,6 +48,9 @@ pub fn build_router(state: AppState) -> Router {
             get(xorb::get_xorb).post(xorb::post_xorb),
         )
         .route("/v1/shards", post(shard::post_shard))
+        // hf_xet >= 1.6 uploads shards to /v2/shards (NDJSON progress) and
+        // only falls back to /v1 on 404/501.
+        .route("/v2/shards", post(shard::post_shard_v2))
         // xet-core's RemoteClient posts to /shards (no /v1/ prefix)
         .route("/shards", post(shard::post_shard))
         .route(
@@ -57,6 +63,9 @@ pub fn build_router(state: AppState) -> Router {
             "/v2/reconstructions/{file_id}",
             get(reconstruction::get_reconstruction_v2),
         )
+        // Stock xet-core clients query the `default` prefix; `default-merkledb`
+        // is the older spelling, kept for the web UI and older clients.
+        .route("/v1/chunks/default/{hash}", get(dedup::get_dedup))
         .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup))
         // Management/lifecycle endpoints (not part of the Xet wire protocol):
         // list and inspect files, release a file, collect garbage, inspect usage.
@@ -131,4 +140,19 @@ pub fn build_router(state: AppState) -> Router {
         .layer(trace_layer)
         .layer(CorsLayer::permissive())
         .with_state(state)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::redact_query;
+
+    #[test]
+    fn redacts_credentials_in_query() {
+        assert_eq!(
+            redact_query("r=0-9&exp=100&sig=deadbeef"),
+            "r=0-9&exp=100&sig=REDACTED"
+        );
+        assert_eq!(redact_query("token=abc&limit=5"), "token=REDACTED&limit=5");
+        assert_eq!(redact_query(""), "");
+    }
 }

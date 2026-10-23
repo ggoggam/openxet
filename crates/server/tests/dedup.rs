@@ -114,3 +114,41 @@ async fn test_dedup_unknown_chunk_404() {
         .unwrap();
     assert_eq!(resp.status(), 404);
 }
+
+/// Stock xet-core clients (hf_xet) query `/v1/chunks/default/{hash}`; it must
+/// answer exactly like the `default-merkledb` spelling, or cross-machine dedup
+/// never triggers.
+#[tokio::test]
+async fn test_dedup_default_prefix_matches_merkledb_prefix() {
+    let server = TestServer::start().await;
+    let artifacts = build_upload_artifacts(&generate_test_data(256 * 1024));
+    upload_artifacts(&server, &artifacts).await;
+    let chunk_hash = artifacts.chunk_hashes[0].hex();
+
+    for prefix in ["default", "default-merkledb"] {
+        let resp = server
+            .client
+            .get(format!(
+                "{}/v1/chunks/{prefix}/{chunk_hash}",
+                server.base_url
+            ))
+            .bearer_auth(server.read_token())
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 200, "{prefix}");
+        let body = resp.bytes().await.unwrap();
+        let shard_info = MDBShardInfo::load_from_reader(&mut Cursor::new(&body[..])).unwrap();
+        assert!(shard_info.chunk_hashes_protected(), "{prefix}");
+    }
+
+    let unknown = "f".repeat(64);
+    let resp = server
+        .client
+        .get(format!("{}/v1/chunks/default/{unknown}", server.base_url))
+        .bearer_auth(server.read_token())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 404);
+}

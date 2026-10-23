@@ -66,7 +66,7 @@ Retrieve file reconstruction metadata for downloading a file.
 **Implementation notes:**
 - Look up file_id in the file index → find the shard containing this file's reconstruction
 - Deserialize the shard's FileInfo section to build the terms list
-- For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own public `/v1/xorbs/default/{hash}` route. Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
+- For each xorb referenced in the terms, generate a fetch URL pointing to the xorb data with the correct byte range. Cloud backends (S3/GCS/Azure) return a presigned URL straight to object storage; the local filesystem backend, which cannot presign, returns the server's own `/v1/xorbs/default/{hash}` route with an HMAC-signed, expiring query string scoped to that byte range (see §5). Either way the URL is self-authenticating — xet-core fetches it with no `Authorization` header.
 - For range requests: compute which terms/chunks overlap the requested byte range, set `offset_into_first_range` accordingly, trim terms
 
 ### 3.2 GET /v2/reconstructions/{file_id}
@@ -126,9 +126,11 @@ a list of fetch entries instead of per-range presigned URL records.
   content), the terms' chunk ranges are merged per xorb (overlapping/adjacent
   ranges collapse) and each surviving range becomes its own fetch entry.
 
-### 3.3 GET /v1/chunks/default-merkledb/{hash}
+### 3.3 GET /v1/chunks/default/{hash}
 
-Query global chunk deduplication.
+Query global chunk deduplication. Stock xet-core clients use the `default`
+prefix; `/v1/chunks/default-merkledb/{hash}` is an alias with the same
+behavior.
 
 **Path params:**
 - `hash`: 64-char lowercase hex chunk hash
@@ -195,11 +197,22 @@ Upload a shard (register files).
 **Implementation notes:**
 - Parse shard header (verify tag + version=2, footer_size=0)
 - Parse FileInfo section: for each file, read FileDataSequenceHeader, entries, verification entries, metadata ext
-- Validate verification entries: for each term, recompute verification hash from stored xorb chunk hashes and compare
+- Require verification entries on every file (400 otherwise), and for each term recompute the verification hash from the stored xorb chunk hashes and compare. Computing one takes the term's raw chunk hashes, so it doubles as proof that the uploader holds the content: without it, a file that is one whole xorb has a file hash computable from the xorb hash alone, and anyone who knew a xorb hash could register a file over it and gain an ownership claim that reads it. Errors never echo a computed hash.
+- Check each term's `unpacked_segment_bytes` against the sizes of its chunks
 - Validate that all referenced xorbs exist in storage
 - Parse CAS Info section: register chunk→xorb mappings for future dedup queries
 - Index file_hash → shard for future reconstruction lookups
 - Store shard content-addressed
+
+### 3.6 POST /v2/shards
+
+Same request, auth, validation, and errors as `POST /v1/shards`. hf_xet >= 1.6
+posts here first and falls back to `/v1/shards` only on 404/501.
+
+**Response (200):** `application/x-ndjson` — a progress stream whose terminal
+frame is `{"type":"result"}`. The server validates and commits before it
+responds, so it sends only that terminal frame, and failures keep their HTTP
+status instead of arriving as an in-stream `{"type":"error"}` frame.
 
 ---
 
@@ -319,19 +332,38 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
   signed with an asymmetric algorithm. The server verifies it against the
   issuer's JWKS (fetched via OIDC discovery and cached). Issuers are
   allow-listed in `auth.oidc_issuers`; `auth.oidc_audience` optionally pins
-  `aud`. Any valid token from an allowed issuer currently grants full
-  read/write — issuance is the access-control point.
+  `aud`. The token's OAuth `scope`, top-level `roles`, Keycloak realm roles
+  (`realm_access.roles`), and Keycloak client roles (`resource_access.*.roles`)
+  are matched against `auth.oidc_read_role` / `oidc_write_role` /
+  `oidc_admin_role` (defaults `openxet:read`, `openxet:write`,
+  `openxet:admin`; env `OPENXET_OIDC_{READ,WRITE,ADMIN}_ROLE`), and the
+  strongest match wins. A valid token with none of them is refused with `403`
+  unless `auth.oidc_default_scope` (`OPENXET_OIDC_DEFAULT_SCOPE`) names a
+  fallback scope.
 - **Fetch URLs** on reconstruction `fetch_info` entries are self-authenticating
-  and carry no OpenXet credential: cloud backends return a presigned
-  object-store URL, and the filesystem backend returns the server's own
-  **unauthenticated** `GET /v1/xorbs/default/{hash}` route (content-addressed
-  hash is the only handle). The server no longer mints fetch-URL tokens.
+  because xet-core fetches them with no `Authorization` header: cloud backends
+  return a presigned object-store URL, and the filesystem backend returns the
+  server's own `GET /v1/xorbs/default/{hash}?r={start}-{end}&exp={unix}&sig={hex}`
+  route. `sig` is HMAC-SHA256 over the xorb hash, the inclusive byte span, and
+  the expiry (`auth.shard_key_ttl_seconds` from issue), keyed by
+  `auth.xorb_url_secret` (`OPENXET_XORB_URL_SECRET`; random per process when
+  unset, so set it when running replicas). A request must send a `Range`
+  inside the signed span. Unsigned, tampered, or expired URLs get `401`; a
+  `Range` outside the span gets `403`. The `sig` value is redacted from
+  request logs.
 - **Development:** `auth.enabled = false` (or `OPENXET_AUTH_ENABLED=false`)
-  skips all token checks; the server logs a loud warning.
+  skips all token checks and treats every request as admin; the server logs a
+  loud warning.
 
-Write scope supersedes read; middleware validates the Bearer `Authorization`
-header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` is the one
-unauthenticated route (the filesystem fetch-URL fallback).
+Reads are scoped to ownership claims: a non-admin caller can reconstruct
+(`/v1` and `/v2`), inspect (`GET /v1/files/{id}`), or list (`GET /v1/files`)
+only files its `sub` holds a claim on; other files answer `404`. Cross-tenant
+endpoints (`GET /v1/xorbs`, `GET /v1/accounting`, `POST /v1/gc`) and fetching a
+xorb by hash with a bearer token instead of a signed URL need admin scope.
+
+Admin scope supersedes write, which supersedes read; middleware validates the Bearer `Authorization`
+header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` accepts
+either a signed fetch URL or a bearer token.
 
 ---
 
@@ -462,7 +494,7 @@ The Rust server serves `frontend/dist/` at `/` with SPA fallback (all non-v1 rou
 11. Auth middleware (JWT generation + validation)
 12. `POST /v1/xorbs/default/{hash}` — xorb upload with validation
 13. `POST /v1/shards` — shard upload with xorb existence checks and verification hash validation
-14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned (cloud) / public-route (filesystem) fetch URLs
+14. `GET /v1/reconstructions/{file_id}` — file reconstruction with range support and presigned (cloud) / HMAC-signed (filesystem) fetch URLs
 15. `GET /v1/chunks/default-merkledb/{hash}` — global dedup with HMAC-protected shard responses
 16. Error handling (retryable vs non-retryable), rate limiting
 

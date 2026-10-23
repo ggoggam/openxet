@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::Deserialize;
 
+use crate::auth::Scope;
+
 #[derive(Parser, Debug)]
 #[command(name = "openxet-server", about = "OpenXet CAS server")]
 pub struct Cli {
@@ -112,8 +114,27 @@ pub struct AuthConfig {
     /// checked (signature + issuer + expiry are still enforced).
     pub oidc_audience: Option<String>,
 
+    /// OIDC scope or role names that grant OpenXet `read`, `write`, and
+    /// `admin`. A token's OAuth `scope`, top-level `roles`, Keycloak realm
+    /// roles, and Keycloak client roles are all searched; the strongest match
+    /// wins.
+    pub oidc_read_role: String,
+    pub oidc_write_role: String,
+    pub oidc_admin_role: String,
+
+    /// Scope granted to a valid OIDC token that carries none of the roles
+    /// above. `None` (the default) refuses such tokens with 403. Set `write`
+    /// only when token issuance itself is the access-control point.
+    pub oidc_default_scope: Option<Scope>,
+
     /// How long a fetched JWKS is trusted before it is refetched, in seconds.
     pub jwks_ttl_seconds: u64,
+
+    /// Secret for signing xorb fetch URLs on backends that cannot presign
+    /// (filesystem). Unset means a random key per process: fine for a single
+    /// server, but every replica behind a load balancer must share one, and a
+    /// restart invalidates outstanding URLs (they live `shard_key_ttl_seconds`).
+    pub xorb_url_secret: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,6 +146,12 @@ pub struct GcConfig {
     /// young unreferenced xorb is usually an upload in flight.
     pub grace_seconds: u64,
 
+    /// Floor for `grace_seconds`, including the `?grace_seconds=` override on
+    /// `POST /v1/gc`: an override below it is rejected, and so is a configured
+    /// `grace_seconds` below it at startup. Keeps a GC call from deleting
+    /// xorbs a concurrent upload has sent but not yet registered in a shard.
+    pub min_grace_seconds: u64,
+
     /// When set, run a GC pass automatically every this many seconds. Unset
     /// (the default) means GC only runs when POST /v1/gc is called.
     pub interval_seconds: Option<u64>,
@@ -134,6 +161,7 @@ impl Default for GcConfig {
     fn default() -> Self {
         Self {
             grace_seconds: 24 * 60 * 60,
+            min_grace_seconds: 60 * 60,
             interval_seconds: None,
         }
     }
@@ -181,7 +209,12 @@ impl Default for AuthConfig {
             shard_key_ttl_seconds: 3600,
             oidc_issuers: Vec::new(),
             oidc_audience: None,
+            oidc_read_role: "openxet:read".to_string(),
+            oidc_write_role: "openxet:write".to_string(),
+            oidc_admin_role: "openxet:admin".to_string(),
+            oidc_default_scope: None,
             jwks_ttl_seconds: 900,
+            xorb_url_secret: None,
         }
     }
 }
@@ -210,6 +243,14 @@ impl AppConfig {
 
         // Environment variable overrides (highest priority)
         config.apply_env_overrides();
+
+        if config.gc.grace_seconds < config.gc.min_grace_seconds {
+            anyhow::bail!(
+                "gc.grace_seconds ({}) is below gc.min_grace_seconds ({})",
+                config.gc.grace_seconds,
+                config.gc.min_grace_seconds
+            );
+        }
 
         Ok(config)
     }
@@ -302,15 +343,42 @@ impl AppConfig {
         if let Ok(aud) = std::env::var("OPENXET_OIDC_AUDIENCE") {
             self.auth.oidc_audience = Some(aud);
         }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_READ_ROLE") {
+            self.auth.oidc_read_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_WRITE_ROLE") {
+            self.auth.oidc_write_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_ADMIN_ROLE") {
+            self.auth.oidc_admin_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_DEFAULT_SCOPE") {
+            self.auth.oidc_default_scope = match v.trim() {
+                "read" => Some(Scope::Read),
+                "write" => Some(Scope::Write),
+                "admin" => Some(Scope::Admin),
+                _ => None,
+            };
+        }
         if let Ok(ttl) = std::env::var("OPENXET_JWKS_TTL")
             && let Ok(ttl) = ttl.parse::<u64>()
         {
             self.auth.jwks_ttl_seconds = ttl;
         }
+        if let Ok(v) = std::env::var("OPENXET_XORB_URL_SECRET")
+            && !v.is_empty()
+        {
+            self.auth.xorb_url_secret = Some(v);
+        }
         if let Ok(v) = std::env::var("OPENXET_GC_GRACE_SECONDS")
             && let Ok(v) = v.parse::<u64>()
         {
             self.gc.grace_seconds = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_GC_MIN_GRACE_SECONDS")
+            && let Ok(v) = v.parse::<u64>()
+        {
+            self.gc.min_grace_seconds = v;
         }
         if let Ok(v) = std::env::var("OPENXET_GC_INTERVAL_SECONDS")
             && let Ok(v) = v.parse::<u64>()

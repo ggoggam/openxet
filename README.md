@@ -89,7 +89,15 @@ same variables apply if you run the binary directly:
 | `OPENXET_S3_ALLOW_HTTP` | — | `true` |
 
 For authentication, configure OIDC issuers (`OPENXET_OIDC_ISSUERS`); clients then
-present bearer tokens from that provider. Leave `OPENXET_AUTH_ENABLED=false`
+present bearer tokens from that provider. A token needs one of the roles or
+scopes `openxet:read`, `openxet:write`, or `openxet:admin` (as an OAuth scope,
+a `roles` entry, or a Keycloak realm/client role; rename them with
+`OPENXET_OIDC_{READ,WRITE,ADMIN}_ROLE`). Tokens with none of them get 403. Set
+`OPENXET_OIDC_DEFAULT_SCOPE=write` to restore the old behavior where any token
+the issuer hands out can write. On the filesystem backend,
+reconstruction responses carry HMAC-signed, expiring xorb fetch URLs; set
+`OPENXET_XORB_URL_SECRET` to the same value on every replica so a URL signed by
+one verifies on another. Leave `OPENXET_AUTH_ENABLED=false`
 (the mise default) for local/dev use.
 
 ### Running with Docker
@@ -150,10 +158,11 @@ wasm ┤
 |--------|------|-------------|
 | `GET` | `/v1/reconstructions/{file_id}` | File reconstruction (supports Range header) |
 | `GET` | `/v2/reconstructions/{file_id}` | V2 file reconstruction — per-xorb fetch entries; preferred by current xet-core clients |
-| `GET` | `/v1/chunks/default-merkledb/{hash}` | Global chunk deduplication query |
-| `GET` | `/v1/xorbs/default/{hash}` | Download a xorb |
+| `GET` | `/v1/chunks/default/{hash}` | Global chunk deduplication query (`default-merkledb` is accepted as an alias) |
+| `GET` | `/v1/xorbs/default/{hash}` | Download a xorb (filesystem backend only; needs a signed fetch URL from a reconstruction response, or a bearer token) |
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
+| `POST` | `/v2/shards` | Same as `/v1/shards`, answered as the NDJSON progress stream hf_xet >= 1.6 uses |
 
 These are the same wire protocol endpoints HuggingFace's `xet-core` / `hf_xet`
 clients speak. All uploads and downloads, including the web UI's and the
@@ -165,12 +174,12 @@ Not part of the Xet wire protocol — these manage the data's lifecycle:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/files` | List files (cursor-paginated), optionally filtered to one owner's files |
-| `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs |
+| `GET` | `/v1/files` | List files (cursor-paginated): the caller's own files, or any owner's for an admin |
+| `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs (owners and admins only) |
 | `DELETE` | `/v1/files/{file_id}` | Release the caller's ownership claim on a file; the file is removed once its last claim is released |
-| `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count |
-| `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (optional `?grace_seconds=` override); returns a report of what was deleted |
-| `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio |
+| `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count (admin) |
+| `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (admin; optional `?grace_seconds=` override, no lower than `gc.min_grace_seconds`); returns a report of what was deleted |
+| `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio (admin) |
 
 **Cursor pagination.** List endpoints (`/v1/files`, `/v1/xorbs`) take `?limit=`
 (default 100, max 1000) and return `{ "items": [...], "next_cursor": "..." }`.
@@ -179,13 +188,17 @@ its absence means the last page. Cursors are opaque and use keyset pagination
 over the ordered index (by content hash), so each page is an indexed range scan
 regardless of depth, and concurrent inserts or deletes never shift rows across
 page boundaries. `/v1/files` also accepts `?owner=` to list only one owner's
-files.
+files (admins only, for anyone but the caller).
 
 Every file registered via a shard upload records an **ownership claim** for the
 uploading identity (the token's `sub` claim; `"default"` when auth is
 disabled). Claims are the accounting unit: each owner is charged the full
 logical size of the files they claim, and a file only becomes garbage when
-every claim on it is released.
+every claim on it is released. Claims are also the read boundary: a caller can
+reconstruct, inspect, or list only files it holds a claim on (uploading the
+same content again records one), and any other file answers 404 as if it did
+not exist. Admin tokens read everything. A file with no claims (uploaded before
+accounting existed) is visible to and deletable by admins only.
 
 **Garbage collection** is mark-and-sweep: files in the index are the roots,
 their shards are parsed to mark reachable xorbs, and everything unmarked is
@@ -193,8 +206,11 @@ deleted — including its dedup index entries. Unreferenced objects younger than
 `gc.grace_seconds` (default 24h) are never collected, because clients upload
 xorbs *before* registering them in a shard; keep the grace period comfortably
 above your longest plausible upload session. GC runs on demand via `POST
-/v1/gc`, or periodically when `gc.interval_seconds`
-(`OPENXET_GC_INTERVAL_SECONDS`) is set.
+/v1/gc` (admin scope), or periodically when `gc.interval_seconds`
+(`OPENXET_GC_INTERVAL_SECONDS`) is set. `gc.min_grace_seconds`
+(`OPENXET_GC_MIN_GRACE_SECONDS`, default 1h) is a floor: a `?grace_seconds=`
+override below it is rejected with 400, and the server refuses to start with a
+configured `gc.grace_seconds` below it.
 
 ### Storage Layout
 

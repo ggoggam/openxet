@@ -6,14 +6,30 @@ use serde::{Deserialize, Serialize};
 pub enum Scope {
     Read,
     Write,
+    /// Operator scope: everything `write` can do plus server-wide management
+    /// (GC, cross-tenant reads).
+    Admin,
 }
 
 impl Scope {
-    /// Write scope supersedes read.
+    /// Scopes are ordered: admin supersedes write, which supersedes read.
     pub fn satisfies(self, required: Scope) -> bool {
-        match required {
-            Scope::Read => true,
-            Scope::Write => self == Scope::Write,
+        self.rank() >= required.rank()
+    }
+
+    fn rank(self) -> u8 {
+        match self {
+            Scope::Read => 0,
+            Scope::Write => 1,
+            Scope::Admin => 2,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Scope::Read => "read",
+            Scope::Write => "write",
+            Scope::Admin => "admin",
         }
     }
 }
@@ -71,5 +87,14 @@ mod tests {
         assert!(Scope::Write.satisfies(Scope::Write));
         assert!(Scope::Read.satisfies(Scope::Read));
         assert!(!Scope::Read.satisfies(Scope::Write));
+    }
+
+    #[test]
+    fn test_admin_scope_supersedes_write() {
+        assert!(Scope::Admin.satisfies(Scope::Read));
+        assert!(Scope::Admin.satisfies(Scope::Write));
+        assert!(Scope::Admin.satisfies(Scope::Admin));
+        assert!(!Scope::Write.satisfies(Scope::Admin));
+        assert!(!Scope::Read.satisfies(Scope::Admin));
     }
 }

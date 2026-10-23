@@ -15,8 +15,10 @@ use openxet_cas_types::reconstruction::{
 use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
 use xet_core_structures::xorb_object::XORB_CHUNK_HEADER_LENGTH;
 
-use crate::auth::RequireRead;
+use crate::auth::fetch_url::{now_unix, sign_xorb_url};
+use crate::auth::{Claims, RequireRead};
 use crate::error::AppError;
+use crate::routes::files::authorize_file_read;
 use crate::routes::xorb_meta::{chunk_byte_offsets, xorb_info_from_stored};
 use crate::state::AppState;
 use crate::storage::index::XorbLayout;
@@ -29,7 +31,7 @@ use crate::storage::{ChunkIndex, FileIndex, StorageBackend, validate_hash};
 const RECON_FETCH_CONCURRENCY: usize = 16;
 
 /// Parse an HTTP Range header of the form "bytes=start-end" (inclusive end).
-fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppError> {
+pub(crate) fn parse_range_header(headers: &HeaderMap) -> Result<Option<(u64, u64)>, AppError> {
     let Some(range_val) = headers.get("range") else {
         return Ok(None);
     };
@@ -89,10 +91,12 @@ fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>
 /// along with the (possibly trimmed) terms.
 async fn reconstruction_terms(
     state: &AppState,
+    claims: &Claims,
     file_id: &str,
     headers: &HeaderMap,
 ) -> Result<(u64, Vec<CASReconstructionTerm>), AppError> {
     validate_hash(file_id)?;
+    authorize_file_read(state, claims, file_id).await?;
 
     // Look up file → shard
     let shard_hash = state
@@ -207,12 +211,11 @@ fn merged_chunk_ranges_per_xorb(terms: &[CASReconstructionTerm]) -> Vec<(String,
         .collect()
 }
 
-/// Resolved fetch information for one xorb: a self-authenticating URL plus the
-/// physical byte span of each merged chunk range.
+/// Resolved fetch information for one xorb: each merged chunk range with its
+/// physical byte span and a self-authenticating URL for that span.
 struct XorbFetchEntry {
     hash: String,
-    url: String,
-    ranges: Vec<(ChunkRange, ByteRange)>,
+    ranges: Vec<(ChunkRange, ByteRange, String)>,
 }
 
 /// Build one [`XorbFetchEntry`] per unique xorb referenced by `terms`,
@@ -226,8 +229,9 @@ async fn build_xorb_fetch_entries(
     // must be self-authenticating. Cloud backends satisfy this with a presigned
     // URL straight to object storage (this server stays out of the data path).
     // The local filesystem can't presign, so it falls back to the server's own
-    // public xorb route. Prefer the configured public URL for that fallback;
-    // otherwise use the request `Host`, then the bound address.
+    // xorb route with an HMAC-signed, expiring URL scoped to one byte span.
+    // Prefer the configured public URL for that fallback; otherwise use the
+    // request `Host`, then the bound address.
     let base_url = state
         .config
         .server
@@ -242,6 +246,7 @@ async fn build_xorb_fetch_entries(
         .unwrap_or_else(|| state.config.base_url());
 
     let url_ttl = Duration::from_secs(state.config.auth.shard_key_ttl_seconds);
+    let url_exp = now_unix() + url_ttl.as_secs();
 
     stream::iter(merged_chunk_ranges_per_xorb(terms))
         .map(|(hash, chunk_ranges)| {
@@ -293,12 +298,26 @@ async fn build_xorb_fetch_entries(
                     return Ok::<_, AppError>(None);
                 }
 
-                let url = match state.storage.presigned_xorb_url(&hash, url_ttl).await? {
-                    Some(presigned) => presigned,
-                    None => format!("{base_url}/v1/xorbs/default/{hash}"),
-                };
+                let presigned = state.storage.presigned_xorb_url(&hash, url_ttl).await?;
+                let ranges = ranges
+                    .into_iter()
+                    .map(|(chunks, bytes)| {
+                        let url = match &presigned {
+                            Some(presigned) => presigned.clone(),
+                            None => sign_xorb_url(
+                                &state.xorb_url_key,
+                                base_url,
+                                &hash,
+                                bytes.start,
+                                bytes.end,
+                                url_exp,
+                            ),
+                        };
+                        (chunks, bytes, url)
+                    })
+                    .collect();
 
-                Ok(Some(XorbFetchEntry { hash, url, ranges }))
+                Ok(Some(XorbFetchEntry { hash, ranges }))
             }
         })
         .buffer_unordered(RECON_FETCH_CONCURRENCY)
@@ -309,21 +328,22 @@ async fn build_xorb_fetch_entries(
 
 pub async fn get_reconstruction(
     State(state): State<AppState>,
-    RequireRead(_claims): RequireRead,
+    RequireRead(claims): RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<QueryReconstructionResponse>, AppError> {
-    let (offset_into_first_range, terms) = reconstruction_terms(&state, &file_id, &headers).await?;
+    let (offset_into_first_range, terms) =
+        reconstruction_terms(&state, &claims, &file_id, &headers).await?;
     let entries = build_xorb_fetch_entries(&state, &terms, &headers).await?;
 
     let fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>> = entries
         .into_iter()
-        .map(|XorbFetchEntry { hash, url, ranges }| {
+        .map(|XorbFetchEntry { hash, ranges }| {
             let infos = ranges
                 .into_iter()
-                .map(|(chunks, bytes)| CASReconstructionFetchInfo {
+                .map(|(chunks, bytes, url)| CASReconstructionFetchInfo {
                     range: chunks,
-                    url: url.clone(),
+                    url,
                     url_range: bytes,
                 })
                 .collect();
@@ -340,11 +360,12 @@ pub async fn get_reconstruction(
 
 pub async fn get_reconstruction_v2(
     State(state): State<AppState>,
-    RequireRead(_claims): RequireRead,
+    RequireRead(claims): RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<QueryReconstructionResponseV2>, AppError> {
-    let (offset_into_first_range, terms) = reconstruction_terms(&state, &file_id, &headers).await?;
+    let (offset_into_first_range, terms) =
+        reconstruction_terms(&state, &claims, &file_id, &headers).await?;
     let entries = build_xorb_fetch_entries(&state, &terms, &headers).await?;
 
     // One single-range fetch entry per merged chunk range: xet-core sends all
@@ -354,11 +375,11 @@ pub async fn get_reconstruction_v2(
     // fetch on the ordinary 206 path.
     let xorbs: HashMap<String, Vec<XorbMultiRangeFetch>> = entries
         .into_iter()
-        .map(|XorbFetchEntry { hash, url, ranges }| {
+        .map(|XorbFetchEntry { hash, ranges }| {
             let fetches = ranges
                 .into_iter()
-                .map(|(chunks, bytes)| XorbMultiRangeFetch {
-                    url: url.clone(),
+                .map(|(chunks, bytes, url)| XorbMultiRangeFetch {
+                    url,
                     ranges: vec![XorbRangeDescriptor { chunks, bytes }],
                 })
                 .collect();

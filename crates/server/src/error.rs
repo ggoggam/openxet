@@ -70,6 +70,7 @@ impl From<StorageError> for AppError {
         match err {
             StorageError::NotFound(msg) => AppError::NotFound(msg),
             StorageError::InvalidHash(msg) => AppError::BadRequest(format!("invalid hash: {msg}")),
+            StorageError::RangeNotSatisfiable => AppError::RangeNotSatisfiable,
             StorageError::TooLarge { size, max } => {
                 tracing::warn!("payload too large: {size} bytes (max {max})");
                 AppError::PayloadTooLarge

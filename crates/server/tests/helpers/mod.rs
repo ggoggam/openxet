@@ -47,17 +47,25 @@ impl TestServer {
     /// `postgres_url`. Used by the Postgres-gated integration test.
     #[allow(dead_code)]
     pub async fn start_with_postgres(postgres_url: &str) -> Self {
-        Self::start_configured(true, "sqlite", Some(postgres_url.to_string())).await
+        Self::start_configured(true, "sqlite", Some(postgres_url.to_string()), 0).await
+    }
+
+    /// Start a server that enforces a GC grace floor (the others use 0 so
+    /// tests can collect immediately).
+    #[allow(dead_code)]
+    pub async fn start_with_min_gc_grace(min_grace_seconds: u64) -> Self {
+        Self::start_configured(true, "sqlite", None, min_grace_seconds).await
     }
 
     async fn start_inner(auth_enabled: bool) -> Self {
-        Self::start_configured(auth_enabled, "sqlite", None).await
+        Self::start_configured(auth_enabled, "sqlite", None, 0).await
     }
 
     async fn start_configured(
         auth_enabled: bool,
         local_index_backend: &str,
         postgres_url: Option<String>,
+        min_gc_grace_seconds: u64,
     ) -> Self {
         let index_backend = if postgres_url.is_some() {
             "postgres".to_string()
@@ -93,7 +101,10 @@ impl TestServer {
                 shard_key_ttl_seconds: 3600,
                 ..Default::default()
             },
-            gc: Default::default(),
+            gc: openxet_server::config::GcConfig {
+                min_grace_seconds: min_gc_grace_seconds,
+                ..Default::default()
+            },
         };
 
         let storage = Arc::new(build_storage(&config.storage).await.unwrap());
@@ -115,6 +126,7 @@ impl TestServer {
             // Tests mint HS256 tokens against this known secret, exercising
             // the same verify path the server's self-minted fetch tokens use.
             fetch_token_secret: TEST_SECRET.into(),
+            xorb_url_key: b"test-xorb-url-key".as_slice().into(),
         };
 
         let app = build_router(state);
@@ -142,6 +154,30 @@ impl TestServer {
             repo: "test".to_string(),
             exp: (chrono_exp()),
             sub: "test-user".to_string(),
+        };
+        create_token(TEST_SECRET, &claims).unwrap()
+    }
+
+    /// Mint an admin token (operator endpoints, cross-tenant reads).
+    #[allow(dead_code)]
+    pub fn admin_token(&self) -> String {
+        let claims = Claims {
+            scope: Scope::Admin,
+            repo: "test".to_string(),
+            exp: (chrono_exp()),
+            sub: "test-admin".to_string(),
+        };
+        create_token(TEST_SECRET, &claims).unwrap()
+    }
+
+    /// Mint a read token for a specific subject.
+    #[allow(dead_code)]
+    pub fn read_token_for(&self, sub: &str) -> String {
+        let claims = Claims {
+            scope: Scope::Read,
+            repo: "test".to_string(),
+            exp: (chrono_exp()),
+            sub: sub.to_string(),
         };
         create_token(TEST_SECRET, &claims).unwrap()
     }
@@ -348,8 +384,16 @@ pub async fn upload_artifacts_with_token(
 /// term's byte range from its fetch_info URL, decompress, and concatenate.
 #[allow(dead_code)]
 pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<u8> {
-    let token = server.read_token();
+    download_via_protocol_with_token(server, file_hash, &server.read_token()).await
+}
 
+/// Like [`download_via_protocol`] but as a specific caller.
+#[allow(dead_code)]
+pub async fn download_via_protocol_with_token(
+    server: &TestServer,
+    file_hash: &str,
+    token: &str,
+) -> Vec<u8> {
     let resp = server
         .client
         .get(format!(

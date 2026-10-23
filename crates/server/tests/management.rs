@@ -1,4 +1,5 @@
-//! Management API tests: cursor-paginated file/xorb listing and file detail.
+//! Management API tests: cursor-paginated file/xorb listing and file detail,
+//! as an admin (see `tenant_isolation.rs` for what other callers see).
 
 mod helpers;
 
@@ -66,7 +67,7 @@ async fn list_files_page(
     let resp = server
         .client
         .get(format!("{}/v1/files?{query}", server.base_url))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -191,7 +192,7 @@ async fn file_detail_returns_owners_and_referenced_xorbs() {
             "{}/v1/files/{}",
             server.base_url, artifacts.file_hash
         ))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -234,7 +235,7 @@ async fn file_detail_404_for_unknown_file() {
     let resp = server
         .client
         .get(format!("{}/v1/files/{missing}", server.base_url))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -261,7 +262,7 @@ async fn xorb_listing_paginates() {
         let resp = server
             .client
             .get(format!("{}/v1/xorbs?{query}", server.base_url))
-            .bearer_auth(server.read_token())
+            .bearer_auth(server.admin_token())
             .send()
             .await
             .unwrap();
@@ -300,7 +301,7 @@ async fn invalid_cursor_is_rejected() {
             "{}/v1/files?cursor=not_base64_!!!",
             server.base_url
         ))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();

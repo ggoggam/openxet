@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::header;
+use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde::Serialize;
 
@@ -13,7 +15,7 @@ use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chu
 use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
 use xet_core_structures::xorb_object::XorbObjectInfoV1;
 
-use crate::auth::RequireWrite;
+use crate::auth::{Claims, RequireWrite};
 use crate::error::AppError;
 use crate::routes::xorb_meta::xorb_info_from_stored;
 use crate::state::AppState;
@@ -28,11 +30,39 @@ pub struct ShardUploadResponse {
     pub result: u8,
 }
 
+/// POST /v1/shards — register a shard; answers `{"result": 1}` when the shard
+/// was new and `{"result": 0}` when it was already stored.
 pub async fn post_shard(
     State(state): State<AppState>,
     RequireWrite(claims): RequireWrite,
     body: Bytes,
 ) -> Result<Json<ShardUploadResponse>, AppError> {
+    let was_inserted = register_shard(&state, &claims, body).await?;
+    Ok(Json(ShardUploadResponse {
+        result: if was_inserted { 1 } else { 0 },
+    }))
+}
+
+/// POST /v2/shards — the same registration as `/v1/shards`, answered as the
+/// NDJSON progress stream hf_xet >= 1.6 expects. Validation finishes before
+/// the response starts, so failures keep their HTTP status (400, 5xx, …)
+/// instead of arriving as an in-stream `error` frame, and success is a single
+/// terminal `result` frame.
+pub async fn post_shard_v2(
+    State(state): State<AppState>,
+    RequireWrite(claims): RequireWrite,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    register_shard(&state, &claims, body).await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        "{\"type\":\"result\"}\n",
+    ))
+}
+
+/// Validate a shard upload, store it, and index its files and chunks under the
+/// caller's ownership. Returns whether the shard was newly stored.
+async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Result<bool, AppError> {
     if body.len() > MAX_SHARD_SIZE {
         return Err(AppError::PayloadTooLarge);
     }
@@ -50,13 +80,22 @@ pub async fn post_shard(
     let shard = MDBMinimalShard::from_reader(&mut Cursor::new(&body[..]), true, true)
         .map_err(|e| AppError::BadRequest(format!("invalid shard: {e}")))?;
 
-    // Validate every file block: referenced xorbs must exist, verification
-    // hashes (when present) must match, and — critically — the declared
+    // Validate every file block: referenced xorbs must exist, every term must
+    // carry a matching verification hash and unpacked length, and the declared
     // file_hash must equal the hash recomputed from the actual chunk content.
-    // Without that last check a writer could register arbitrary bytes under any
-    // file hash and poison later reconstructions (the core CAS invariant).
-    // Chunk hashes come from the stored xorbs' metadata footers, which were
-    // themselves verified against the chunk data at xorb upload time.
+    // Without the file hash check a writer could register arbitrary bytes
+    // under any file hash and poison later reconstructions (the core CAS
+    // invariant). Chunk hashes come from the stored xorbs' metadata footers,
+    // which were themselves verified against the chunk data at xorb upload
+    // time.
+    //
+    // Verification hashes are also the proof of possession: computing one
+    // takes the raw chunk hashes of the term, which only someone holding the
+    // content has. Without them, a file that is one whole xorb has a file
+    // hash computable from the xorb hash alone, so anyone who knew a xorb
+    // hash could register a file over it, gain an ownership claim, and read
+    // another tenant's bytes. Error messages therefore never echo a computed
+    // hash back.
     let mut xorb_meta_cache: HashMap<String, Arc<XorbObjectInfoV1>> = HashMap::new();
 
     // (file_hash, logical_bytes) per validated file, for ownership accounting.
@@ -69,6 +108,12 @@ pub async fn post_shard(
             return Err(AppError::BadRequest(
                 "file info block has no entries".to_string(),
             ));
+        }
+        if !file_view.contains_verification() {
+            return Err(AppError::BadRequest(format!(
+                "file {} has no verification entries; upload shards must carry them",
+                file_view.file_hash().hex()
+            )));
         }
 
         // (chunk_hash, size) for the whole file, in term order, to rebuild the
@@ -113,19 +158,11 @@ pub async fn post_shard(
 
             let chunk_hashes = &info.chunk_hashes[chunk_start..chunk_end];
 
-            // Validate the per-term verification hash if the shard carries one.
-            if file_view.contains_verification() {
-                let computed = range_hash_from_chunks(chunk_hashes);
-                let expected = file_view.verification(term_idx).range_hash;
-
-                if computed != expected {
-                    return Err(AppError::BadRequest(format!(
-                        "verification hash mismatch for file {} term {term_idx}: computed={}, expected={}",
-                        file_view.file_hash().hex(),
-                        computed.hex(),
-                        expected.hex()
-                    )));
-                }
+            if range_hash_from_chunks(chunk_hashes) != file_view.verification(term_idx).range_hash {
+                return Err(AppError::BadRequest(format!(
+                    "verification hash mismatch for file {} term {term_idx}",
+                    file_view.file_hash().hex()
+                )));
             }
 
             let mut prev_unpacked = if chunk_start == 0 {
@@ -133,19 +170,29 @@ pub async fn post_shard(
             } else {
                 info.unpacked_chunk_offsets[chunk_start - 1]
             };
+            let term_start = prev_unpacked;
             for k in chunk_start..chunk_end {
                 let unpacked_end = info.unpacked_chunk_offsets[k];
                 file_chunks.push((info.chunk_hashes[k], (unpacked_end - prev_unpacked) as u64));
                 prev_unpacked = unpacked_end;
+            }
+
+            // Reconstruction and range reads trust the term's declared length.
+            if (prev_unpacked - term_start) != entry.unpacked_segment_bytes {
+                return Err(AppError::BadRequest(format!(
+                    "file {} term {term_idx} declares {} unpacked bytes, but its chunks hold {}",
+                    file_view.file_hash().hex(),
+                    entry.unpacked_segment_bytes,
+                    prev_unpacked - term_start
+                )));
             }
         }
 
         let computed_file_hash = file_hash(&file_chunks);
         if computed_file_hash != file_view.file_hash() {
             return Err(AppError::BadRequest(format!(
-                "file hash mismatch: declared={}, computed={}",
-                file_view.file_hash().hex(),
-                computed_file_hash.hex()
+                "file hash mismatch for declared file {}",
+                file_view.file_hash().hex()
             )));
         }
 
@@ -200,7 +247,5 @@ pub async fn post_shard(
         .collect();
     state.chunk_index.put_batch(entries).await?;
 
-    Ok(Json(ShardUploadResponse {
-        result: if was_inserted { 1 } else { 0 },
-    }))
+    Ok(was_inserted)
 }

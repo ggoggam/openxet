@@ -3,8 +3,8 @@
 mod helpers;
 
 use helpers::{
-    TestServer, build_upload_artifacts, download_via_protocol, generate_test_data,
-    upload_artifacts, upload_artifacts_with_token,
+    TestServer, build_upload_artifacts, download_via_protocol, download_via_protocol_with_token,
+    generate_test_data, upload_artifacts, upload_artifacts_with_token,
 };
 
 #[derive(serde::Deserialize)]
@@ -46,7 +46,7 @@ async fn get_accounting(server: &TestServer) -> AccountingResponse {
     let resp = server
         .client
         .get(format!("{}/v1/accounting", server.base_url))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -61,7 +61,7 @@ async fn run_gc(server: &TestServer, grace_seconds: u64) -> GcReport {
             "{}/v1/gc?grace_seconds={grace_seconds}",
             server.base_url
         ))
-        .bearer_auth(server.write_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -245,7 +245,7 @@ async fn shared_file_survives_until_last_owner_releases() {
 
     let report = run_gc(&server, 0).await;
     assert_eq!(report.deleted_xorbs, 0);
-    let downloaded = download_via_protocol(&server, &artifacts.file_hash).await;
+    let downloaded = download_via_protocol_with_token(&server, &artifacts.file_hash, &bob).await;
     assert_eq!(downloaded, data);
 
     // Bob releases: the file is gone and its storage is collectable.
@@ -256,4 +256,41 @@ async fn shared_file_survives_until_last_owner_releases() {
     let report = run_gc(&server, 0).await;
     assert_eq!(report.deleted_xorbs, artifacts.xorb_entries.len() as u64);
     assert_eq!(report.deleted_shards, 1);
+}
+
+async fn gc_status(server: &TestServer, query: &str, token: &str) -> reqwest::StatusCode {
+    server
+        .client
+        .post(format!("{}/v1/gc{query}", server.base_url))
+        .bearer_auth(token)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn gc_requires_admin() {
+    let server = TestServer::start().await;
+    assert_eq!(gc_status(&server, "", &server.write_token()).await, 403);
+    assert_eq!(gc_status(&server, "", &server.read_token()).await, 403);
+    let resp = server
+        .client
+        .post(format!("{}/v1/gc", server.base_url))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 401);
+    assert_eq!(gc_status(&server, "", &server.admin_token()).await, 200);
+}
+
+#[tokio::test]
+async fn gc_rejects_grace_below_minimum() {
+    let server = TestServer::start_with_min_gc_grace(3600).await;
+    let admin = server.admin_token();
+    assert_eq!(gc_status(&server, "?grace_seconds=0", &admin).await, 400);
+    assert_eq!(gc_status(&server, "?grace_seconds=3599", &admin).await, 400);
+    assert_eq!(gc_status(&server, "?grace_seconds=3600", &admin).await, 200);
+    // The configured default (24h) is above the floor.
+    assert_eq!(gc_status(&server, "", &admin).await, 200);
 }

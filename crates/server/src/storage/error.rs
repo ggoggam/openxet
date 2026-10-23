@@ -12,6 +12,9 @@ pub enum StorageError {
     #[error("io error on {path}: {source}")]
     Io { source: io::Error, path: PathBuf },
 
+    #[error("requested range starts past the end of the object")]
+    RangeNotSatisfiable,
+
     #[error("data too large: {size} bytes (max {max})")]
     TooLarge { size: usize, max: usize },
 
