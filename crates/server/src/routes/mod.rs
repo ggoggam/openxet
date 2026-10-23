@@ -48,6 +48,9 @@ pub fn build_router(state: AppState) -> Router {
             get(xorb::get_xorb).post(xorb::post_xorb),
         )
         .route("/v1/shards", post(shard::post_shard))
+        // hf_xet >= 1.6 uploads shards to /v2/shards (NDJSON progress) and
+        // only falls back to /v1 on 404/501.
+        .route("/v2/shards", post(shard::post_shard_v2))
         // xet-core's RemoteClient posts to /shards (no /v1/ prefix)
         .route("/shards", post(shard::post_shard))
         .route(

@@ -4,6 +4,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::http::header;
+use axum::response::IntoResponse;
 use bytes::Bytes;
 use serde::Serialize;
 
@@ -13,7 +15,7 @@ use xet_core_structures::metadata_shard::chunk_verification::range_hash_from_chu
 use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
 use xet_core_structures::xorb_object::XorbObjectInfoV1;
 
-use crate::auth::RequireWrite;
+use crate::auth::{Claims, RequireWrite};
 use crate::error::AppError;
 use crate::routes::xorb_meta::xorb_info_from_stored;
 use crate::state::AppState;
@@ -28,11 +30,39 @@ pub struct ShardUploadResponse {
     pub result: u8,
 }
 
+/// POST /v1/shards — register a shard; answers `{"result": 1}` when the shard
+/// was new and `{"result": 0}` when it was already stored.
 pub async fn post_shard(
     State(state): State<AppState>,
     RequireWrite(claims): RequireWrite,
     body: Bytes,
 ) -> Result<Json<ShardUploadResponse>, AppError> {
+    let was_inserted = register_shard(&state, &claims, body).await?;
+    Ok(Json(ShardUploadResponse {
+        result: if was_inserted { 1 } else { 0 },
+    }))
+}
+
+/// POST /v2/shards — the same registration as `/v1/shards`, answered as the
+/// NDJSON progress stream hf_xet >= 1.6 expects. Validation finishes before
+/// the response starts, so failures keep their HTTP status (400, 5xx, …)
+/// instead of arriving as an in-stream `error` frame, and success is a single
+/// terminal `result` frame.
+pub async fn post_shard_v2(
+    State(state): State<AppState>,
+    RequireWrite(claims): RequireWrite,
+    body: Bytes,
+) -> Result<impl IntoResponse, AppError> {
+    register_shard(&state, &claims, body).await?;
+    Ok((
+        [(header::CONTENT_TYPE, "application/x-ndjson")],
+        "{\"type\":\"result\"}\n",
+    ))
+}
+
+/// Validate a shard upload, store it, and index its files and chunks under the
+/// caller's ownership. Returns whether the shard was newly stored.
+async fn register_shard(state: &AppState, claims: &Claims, body: Bytes) -> Result<bool, AppError> {
     if body.len() > MAX_SHARD_SIZE {
         return Err(AppError::PayloadTooLarge);
     }
@@ -200,7 +230,5 @@ pub async fn post_shard(
         .collect();
     state.chunk_index.put_batch(entries).await?;
 
-    Ok(Json(ShardUploadResponse {
-        result: if was_inserted { 1 } else { 0 },
-    }))
+    Ok(was_inserted)
 }

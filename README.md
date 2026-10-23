@@ -162,6 +162,7 @@ wasm ┤
 | `GET` | `/v1/xorbs/default/{hash}` | Download a xorb (filesystem backend only; needs a signed fetch URL from a reconstruction response, or a bearer token) |
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
+| `POST` | `/v2/shards` | Same as `/v1/shards`, answered as the NDJSON progress stream hf_xet >= 1.6 uses |
 
 These are the same wire protocol endpoints HuggingFace's `xet-core` / `hf_xet`
 clients speak. All uploads and downloads, including the web UI's and the

@@ -201,6 +201,16 @@ Upload a shard (register files).
 - Index file_hash → shard for future reconstruction lookups
 - Store shard content-addressed
 
+### 3.6 POST /v2/shards
+
+Same request, auth, validation, and errors as `POST /v1/shards`. hf_xet >= 1.6
+posts here first and falls back to `/v1/shards` only on 404/501.
+
+**Response (200):** `application/x-ndjson` — a progress stream whose terminal
+frame is `{"type":"result"}`. The server validates and commits before it
+responds, so it sends only that terminal frame, and failures keep their HTTP
+status instead of arriving as an in-stream `{"type":"error"}` frame.
+
 ---
 
 ## 4. Binary Format Details
