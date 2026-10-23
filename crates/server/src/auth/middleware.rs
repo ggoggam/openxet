@@ -216,6 +216,19 @@ impl FromRequestParts<AppState> for RequireRead {
     }
 }
 
+/// Axum extractor that requires `admin` scope.
+pub struct RequireAdmin(pub Claims);
+
+impl FromRequestParts<AppState> for RequireAdmin {
+    type Rejection = AppError;
+
+    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, AppError> {
+        Ok(RequireAdmin(
+            authorize(&parts.headers, state, Scope::Admin).await?,
+        ))
+    }
+}
+
 /// Axum extractor that requires `write` scope.
 pub struct RequireWrite(pub Claims);
 

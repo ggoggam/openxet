@@ -147,6 +147,30 @@ impl TestServer {
         create_token(TEST_SECRET, &claims).unwrap()
     }
 
+    /// Mint an admin token (operator endpoints, cross-tenant reads).
+    #[allow(dead_code)]
+    pub fn admin_token(&self) -> String {
+        let claims = Claims {
+            scope: Scope::Admin,
+            repo: "test".to_string(),
+            exp: (chrono_exp()),
+            sub: "test-admin".to_string(),
+        };
+        create_token(TEST_SECRET, &claims).unwrap()
+    }
+
+    /// Mint a read token for a specific subject.
+    #[allow(dead_code)]
+    pub fn read_token_for(&self, sub: &str) -> String {
+        let claims = Claims {
+            scope: Scope::Read,
+            repo: "test".to_string(),
+            exp: (chrono_exp()),
+            sub: sub.to_string(),
+        };
+        create_token(TEST_SECRET, &claims).unwrap()
+    }
+
     pub fn write_token(&self) -> String {
         self.write_token_for("test-user")
     }
@@ -349,8 +373,16 @@ pub async fn upload_artifacts_with_token(
 /// term's byte range from its fetch_info URL, decompress, and concatenate.
 #[allow(dead_code)]
 pub async fn download_via_protocol(server: &TestServer, file_hash: &str) -> Vec<u8> {
-    let token = server.read_token();
+    download_via_protocol_with_token(server, file_hash, &server.read_token()).await
+}
 
+/// Like [`download_via_protocol`] but as a specific caller.
+#[allow(dead_code)]
+pub async fn download_via_protocol_with_token(
+    server: &TestServer,
+    file_hash: &str,
+    token: &str,
+) -> Vec<u8> {
     let resp = server
         .client
         .get(format!(

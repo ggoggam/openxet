@@ -3,8 +3,8 @@
 mod helpers;
 
 use helpers::{
-    TestServer, build_upload_artifacts, download_via_protocol, generate_test_data,
-    upload_artifacts, upload_artifacts_with_token,
+    TestServer, build_upload_artifacts, download_via_protocol, download_via_protocol_with_token,
+    generate_test_data, upload_artifacts, upload_artifacts_with_token,
 };
 
 #[derive(serde::Deserialize)]
@@ -46,7 +46,7 @@ async fn get_accounting(server: &TestServer) -> AccountingResponse {
     let resp = server
         .client
         .get(format!("{}/v1/accounting", server.base_url))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();
@@ -245,7 +245,7 @@ async fn shared_file_survives_until_last_owner_releases() {
 
     let report = run_gc(&server, 0).await;
     assert_eq!(report.deleted_xorbs, 0);
-    let downloaded = download_via_protocol(&server, &artifacts.file_hash).await;
+    let downloaded = download_via_protocol_with_token(&server, &artifacts.file_hash, &bob).await;
     assert_eq!(downloaded, data);
 
     // Bob releases: the file is gone and its storage is collectable.

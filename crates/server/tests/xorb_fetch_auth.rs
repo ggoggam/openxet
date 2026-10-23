@@ -104,13 +104,27 @@ async fn tampered_signed_url_is_401() {
 }
 
 #[tokio::test]
-async fn bearer_token_still_reads_xorbs() {
+async fn only_admin_bearer_reads_unsigned_xorbs() {
     let server = TestServer::start().await;
     let (_, _, _, hash) = signed_fetch(&server).await;
+    let url = format!("{}/v1/xorbs/default/{hash}", server.base_url);
+
+    // A xorb can hold other tenants' chunks, so read or write scope alone
+    // does not unlock a fetch by hash.
+    for token in [server.read_token(), server.write_token()] {
+        let resp = server
+            .client
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), 403);
+    }
     let resp = server
         .client
-        .get(format!("{}/v1/xorbs/default/{hash}", server.base_url))
-        .bearer_auth(server.read_token())
+        .get(&url)
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();

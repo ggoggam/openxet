@@ -129,7 +129,7 @@ async fn postgres_upload_reconstruct_and_dedup() {
     let resp = server
         .client
         .get(format!("{}/v1/accounting", server.base_url))
-        .bearer_auth(server.read_token())
+        .bearer_auth(server.admin_token())
         .send()
         .await
         .unwrap();

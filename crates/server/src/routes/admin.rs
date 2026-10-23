@@ -4,7 +4,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{RequireRead, RequireWrite};
+use crate::auth::{RequireAdmin, RequireWrite};
 use crate::error::AppError;
 use crate::gc::{GcReport, run_gc};
 use crate::state::AppState;
@@ -54,9 +54,10 @@ pub struct AccountingResponse {
 }
 
 /// GET /v1/accounting — per-owner logical usage plus global physical stats.
+/// Names every owner, so admin only.
 pub async fn get_accounting(
     State(state): State<AppState>,
-    _auth: RequireRead,
+    _auth: RequireAdmin,
 ) -> Result<Json<AccountingResponse>, AppError> {
     let usage = state.file_index.usage().await?;
     let files = state.file_index.list_all().await?.len() as u64;

@@ -15,9 +15,10 @@ use openxet_cas_types::reconstruction::{
 use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
 use xet_core_structures::xorb_object::XORB_CHUNK_HEADER_LENGTH;
 
-use crate::auth::RequireRead;
 use crate::auth::fetch_url::{now_unix, sign_xorb_url};
+use crate::auth::{Claims, RequireRead};
 use crate::error::AppError;
+use crate::routes::files::authorize_file_read;
 use crate::routes::xorb_meta::{chunk_byte_offsets, xorb_info_from_stored};
 use crate::state::AppState;
 use crate::storage::index::XorbLayout;
@@ -90,10 +91,12 @@ fn chunk_byte_offsets_from_layout(layout: &XorbLayout) -> Option<Vec<(u64, u64)>
 /// along with the (possibly trimmed) terms.
 async fn reconstruction_terms(
     state: &AppState,
+    claims: &Claims,
     file_id: &str,
     headers: &HeaderMap,
 ) -> Result<(u64, Vec<CASReconstructionTerm>), AppError> {
     validate_hash(file_id)?;
+    authorize_file_read(state, claims, file_id).await?;
 
     // Look up file → shard
     let shard_hash = state
@@ -325,11 +328,12 @@ async fn build_xorb_fetch_entries(
 
 pub async fn get_reconstruction(
     State(state): State<AppState>,
-    RequireRead(_claims): RequireRead,
+    RequireRead(claims): RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<QueryReconstructionResponse>, AppError> {
-    let (offset_into_first_range, terms) = reconstruction_terms(&state, &file_id, &headers).await?;
+    let (offset_into_first_range, terms) =
+        reconstruction_terms(&state, &claims, &file_id, &headers).await?;
     let entries = build_xorb_fetch_entries(&state, &terms, &headers).await?;
 
     let fetch_info: HashMap<String, Vec<CASReconstructionFetchInfo>> = entries
@@ -356,11 +360,12 @@ pub async fn get_reconstruction(
 
 pub async fn get_reconstruction_v2(
     State(state): State<AppState>,
-    RequireRead(_claims): RequireRead,
+    RequireRead(claims): RequireRead,
     Path(file_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Json<QueryReconstructionResponseV2>, AppError> {
-    let (offset_into_first_range, terms) = reconstruction_terms(&state, &file_id, &headers).await?;
+    let (offset_into_first_range, terms) =
+        reconstruction_terms(&state, &claims, &file_id, &headers).await?;
     let entries = build_xorb_fetch_entries(&state, &terms, &headers).await?;
 
     // One single-range fetch entry per merged chunk range: xet-core sends all

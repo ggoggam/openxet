@@ -10,7 +10,7 @@ use xet_core_structures::xorb_object::constants::MAX_XORB_BYTES;
 
 use crate::auth::fetch_url::{XorbUrlParams, now_unix, verify_xorb_url};
 use crate::auth::middleware::authorize;
-use crate::auth::{RequireRead, RequireWrite, Scope};
+use crate::auth::{RequireAdmin, RequireWrite, Scope};
 use crate::error::AppError;
 use crate::pagination::{Page, clamp_limit, cursor_after};
 use crate::routes::reconstruction::parse_range_header;
@@ -28,10 +28,11 @@ pub struct ListXorbsParams {
 /// GET /v1/xorbs — cursor-paginated listing of indexed xorbs (those with a
 /// recorded layout, i.e. every xorb that participates in dedup), ordered by
 /// xorb hash. Unlike an object-store scan this is an ordered index range, so
-/// pages are stable and each costs only its own rows.
+/// pages are stable and each costs only its own rows. Spans every tenant, so
+/// admin only.
 pub async fn list_xorbs(
     State(state): State<AppState>,
-    _auth: RequireRead,
+    _auth: RequireAdmin,
     Query(params): Query<ListXorbsParams>,
 ) -> Result<Json<Page<XorbSummary>>, AppError> {
     let limit = clamp_limit(params.limit);
@@ -128,8 +129,9 @@ pub async fn post_xorb(
 /// (local filesystem), reconstruction therefore hands out this route with an
 /// HMAC-signed, expiring query string scoped to one byte span; see
 /// [`crate::auth::fetch_url`]. With auth enabled a request must carry either a
-/// valid signature (and a Range inside the signed span) or a bearer token with
-/// read scope. Cloud backends hand out presigned URLs that bypass this route
+/// valid signature (and a Range inside the signed span) or an admin bearer
+/// token: a xorb can hold several tenants' chunks, so plain read scope is not
+/// enough to fetch one by hash. Cloud backends hand out presigned URLs that bypass this route
 /// entirely, so on those backends it serves nothing and 404s.
 pub async fn get_xorb(
     State(state): State<AppState>,
@@ -162,7 +164,7 @@ pub async fn get_xorb(
                 }
             }
         } else {
-            authorize(&headers, &state, Scope::Read).await?;
+            authorize(&headers, &state, Scope::Admin).await?;
         }
     }
 

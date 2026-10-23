@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use xet_core_structures::metadata_shard::streaming_shard::MDBMinimalShard;
 
-use crate::auth::{RequireRead, RequireWrite};
+use crate::auth::{Claims, RequireRead, RequireWrite, Scope};
 use crate::error::AppError;
 use crate::pagination::{Page, clamp_limit, cursor_after};
 use crate::state::AppState;
@@ -21,18 +21,55 @@ pub struct ListFilesParams {
     pub owner: Option<String>,
 }
 
+/// Check that `claims` may read `file_id`: admins read everything, everyone
+/// else only files they hold an ownership claim on (uploading a file, or
+/// identical content, records one). Anything else is reported exactly like a
+/// missing file so the response does not reveal that the hash exists.
+pub(crate) async fn authorize_file_read(
+    state: &AppState,
+    claims: &Claims,
+    file_id: &str,
+) -> Result<(), AppError> {
+    if claims.scope.satisfies(Scope::Admin) {
+        return Ok(());
+    }
+    let owner = claims.owner();
+    let claimed = state
+        .file_index
+        .file_claims(file_id)
+        .await?
+        .iter()
+        .any(|c| c.owner == owner);
+    if claimed {
+        Ok(())
+    } else {
+        Err(AppError::NotFound(format!("file not found: {file_id}")))
+    }
+}
+
 /// GET /v1/files — cursor-paginated file listing, optionally filtered to one
-/// owner's files. Ordered by file hash.
+/// owner's files. Ordered by file hash. Non-admin callers only ever see their
+/// own files.
 pub async fn list_files(
     State(state): State<AppState>,
-    _auth: RequireRead,
+    RequireRead(claims): RequireRead,
     Query(params): Query<ListFilesParams>,
 ) -> Result<Json<Page<FileListEntry>>, AppError> {
     let limit = clamp_limit(params.limit);
     // Treat empty query params (`?owner=`, `?cursor=`) as absent, not as a
     // filter on the empty string.
     let cursor = params.cursor.as_deref().filter(|s| !s.is_empty());
-    let owner = params.owner.as_deref().filter(|s| !s.is_empty());
+    let mut owner = params.owner.as_deref().filter(|s| !s.is_empty());
+    if !claims.scope.satisfies(Scope::Admin) {
+        match owner {
+            Some(o) if o != claims.owner() => {
+                return Err(AppError::Forbidden(
+                    "only admins can list another owner's files".to_string(),
+                ));
+            }
+            _ => owner = Some(claims.owner()),
+        }
+    }
     let after = cursor_after(cursor)?;
 
     // Over-fetch one row so the page knows whether a next one exists.
@@ -58,13 +95,15 @@ pub struct FileDetail {
 }
 
 /// GET /v1/files/{file_id} — full detail for one file: its shard, ownership
-/// claims, and the xorbs it depends on.
+/// claims, and the xorbs it depends on. Non-admin callers must hold a claim on
+/// the file and see only their own claim.
 pub async fn get_file(
     State(state): State<AppState>,
-    _auth: RequireRead,
+    RequireRead(claims): RequireRead,
     Path(file_id): Path<String>,
 ) -> Result<Json<FileDetail>, AppError> {
     validate_hash(&file_id)?;
+    authorize_file_read(&state, &claims, &file_id).await?;
 
     let shard_hash = state
         .file_index
@@ -72,8 +111,11 @@ pub async fn get_file(
         .await?
         .ok_or_else(|| AppError::NotFound(format!("file not indexed: {file_id}")))?;
 
-    let owners = state.file_index.file_claims(&file_id).await?;
+    let mut owners = state.file_index.file_claims(&file_id).await?;
     let logical_bytes = owners.first().map(|c| c.logical_bytes).unwrap_or(0);
+    if !claims.scope.satisfies(Scope::Admin) {
+        owners.retain(|c| c.owner == claims.owner());
+    }
 
     // Parse the shard to list the xorbs this specific file references.
     let bytes = state.storage.get_shard(&shard_hash).await?;
@@ -127,9 +169,14 @@ pub async fn delete_file(
 
     let owners = state.file_index.file_claims(&file_id).await?;
 
-    // A file with no claims predates ownership accounting; any writer may
-    // remove it (there is no owner to arbitrate).
+    // A file with no claims predates ownership accounting. There is no owner
+    // to arbitrate, so only an admin may remove it.
     if owners.is_empty() {
+        if !claims.scope.satisfies(Scope::Admin) {
+            return Err(AppError::Forbidden(
+                "file has no owner; only an admin can delete it".to_string(),
+            ));
+        }
         state.file_index.remove(&file_id).await?;
         return Ok(Json(DeleteFileResponse {
             deleted: true,

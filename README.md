@@ -173,12 +173,12 @@ Not part of the Xet wire protocol — these manage the data's lifecycle:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/v1/files` | List files (cursor-paginated), optionally filtered to one owner's files |
-| `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs |
+| `GET` | `/v1/files` | List files (cursor-paginated): the caller's own files, or any owner's for an admin |
+| `GET` | `/v1/files/{file_id}` | File detail: shard, logical size, ownership claims, and referenced xorbs (owners and admins only) |
 | `DELETE` | `/v1/files/{file_id}` | Release the caller's ownership claim on a file; the file is removed once its last claim is released |
-| `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count |
+| `GET` | `/v1/xorbs` | List indexed xorbs (cursor-paginated) with stored size and chunk count (admin) |
 | `POST` | `/v1/gc` | Run one mark-and-sweep GC pass (optional `?grace_seconds=` override); returns a report of what was deleted |
-| `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio |
+| `GET` | `/v1/accounting` | Per-owner logical usage plus global physical storage stats and dedup ratio (admin) |
 
 **Cursor pagination.** List endpoints (`/v1/files`, `/v1/xorbs`) take `?limit=`
 (default 100, max 1000) and return `{ "items": [...], "next_cursor": "..." }`.
@@ -187,13 +187,17 @@ its absence means the last page. Cursors are opaque and use keyset pagination
 over the ordered index (by content hash), so each page is an indexed range scan
 regardless of depth, and concurrent inserts or deletes never shift rows across
 page boundaries. `/v1/files` also accepts `?owner=` to list only one owner's
-files.
+files (admins only, for anyone but the caller).
 
 Every file registered via a shard upload records an **ownership claim** for the
 uploading identity (the token's `sub` claim; `"default"` when auth is
 disabled). Claims are the accounting unit: each owner is charged the full
 logical size of the files they claim, and a file only becomes garbage when
-every claim on it is released.
+every claim on it is released. Claims are also the read boundary: a caller can
+reconstruct, inspect, or list only files it holds a claim on (uploading the
+same content again records one), and any other file answers 404 as if it did
+not exist. Admin tokens read everything. A file with no claims (uploaded before
+accounting existed) is visible to and deletable by admins only.
 
 **Garbage collection** is mark-and-sweep: files in the index are the roots,
 their shards are parsed to mark reachable xorbs, and everything unmarked is
