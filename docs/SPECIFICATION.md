@@ -126,9 +126,11 @@ a list of fetch entries instead of per-range presigned URL records.
   content), the terms' chunk ranges are merged per xorb (overlapping/adjacent
   ranges collapse) and each surviving range becomes its own fetch entry.
 
-### 3.3 GET /v1/chunks/default-merkledb/{hash}
+### 3.3 GET /v1/chunks/default/{hash}
 
-Query global chunk deduplication.
+Query global chunk deduplication. Stock xet-core clients use the `default`
+prefix; `/v1/chunks/default-merkledb/{hash}` is an alias with the same
+behavior.
 
 **Path params:**
 - `hash`: 64-char lowercase hex chunk hash

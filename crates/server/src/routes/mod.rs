@@ -63,6 +63,9 @@ pub fn build_router(state: AppState) -> Router {
             "/v2/reconstructions/{file_id}",
             get(reconstruction::get_reconstruction_v2),
         )
+        // Stock xet-core clients query the `default` prefix; `default-merkledb`
+        // is the older spelling, kept for the web UI and older clients.
+        .route("/v1/chunks/default/{hash}", get(dedup::get_dedup))
         .route("/v1/chunks/default-merkledb/{hash}", get(dedup::get_dedup))
         // Management/lifecycle endpoints (not part of the Xet wire protocol):
         // list and inspect files, release a file, collect garbage, inspect usage.

@@ -158,7 +158,7 @@ wasm ┤
 |--------|------|-------------|
 | `GET` | `/v1/reconstructions/{file_id}` | File reconstruction (supports Range header) |
 | `GET` | `/v2/reconstructions/{file_id}` | V2 file reconstruction — per-xorb fetch entries; preferred by current xet-core clients |
-| `GET` | `/v1/chunks/default-merkledb/{hash}` | Global chunk deduplication query |
+| `GET` | `/v1/chunks/default/{hash}` | Global chunk deduplication query (`default-merkledb` is accepted as an alias) |
 | `GET` | `/v1/xorbs/default/{hash}` | Download a xorb (filesystem backend only; needs a signed fetch URL from a reconstruction response, or a bearer token) |
 | `POST` | `/v1/xorbs/default/{hash}` | Upload a serialized xorb |
 | `POST` | `/v1/shards` | Upload shard metadata (registers files) |
