@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use serde::Deserialize;
 
+use crate::auth::Scope;
+
 #[derive(Parser, Debug)]
 #[command(name = "openxet-server", about = "OpenXet CAS server")]
 pub struct Cli {
@@ -112,6 +114,19 @@ pub struct AuthConfig {
     /// checked (signature + issuer + expiry are still enforced).
     pub oidc_audience: Option<String>,
 
+    /// OIDC scope or role names that grant OpenXet `read`, `write`, and
+    /// `admin`. A token's OAuth `scope`, top-level `roles`, Keycloak realm
+    /// roles, and Keycloak client roles are all searched; the strongest match
+    /// wins.
+    pub oidc_read_role: String,
+    pub oidc_write_role: String,
+    pub oidc_admin_role: String,
+
+    /// Scope granted to a valid OIDC token that carries none of the roles
+    /// above. `None` (the default) refuses such tokens with 403. Set `write`
+    /// only when token issuance itself is the access-control point.
+    pub oidc_default_scope: Option<Scope>,
+
     /// How long a fetched JWKS is trusted before it is refetched, in seconds.
     pub jwks_ttl_seconds: u64,
 
@@ -187,6 +202,10 @@ impl Default for AuthConfig {
             shard_key_ttl_seconds: 3600,
             oidc_issuers: Vec::new(),
             oidc_audience: None,
+            oidc_read_role: "openxet:read".to_string(),
+            oidc_write_role: "openxet:write".to_string(),
+            oidc_admin_role: "openxet:admin".to_string(),
+            oidc_default_scope: None,
             jwks_ttl_seconds: 900,
             xorb_url_secret: None,
         }
@@ -308,6 +327,23 @@ impl AppConfig {
         }
         if let Ok(aud) = std::env::var("OPENXET_OIDC_AUDIENCE") {
             self.auth.oidc_audience = Some(aud);
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_READ_ROLE") {
+            self.auth.oidc_read_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_WRITE_ROLE") {
+            self.auth.oidc_write_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_ADMIN_ROLE") {
+            self.auth.oidc_admin_role = v;
+        }
+        if let Ok(v) = std::env::var("OPENXET_OIDC_DEFAULT_SCOPE") {
+            self.auth.oidc_default_scope = match v.trim() {
+                "read" => Some(Scope::Read),
+                "write" => Some(Scope::Write),
+                "admin" => Some(Scope::Admin),
+                _ => None,
+            };
         }
         if let Ok(ttl) = std::env::var("OPENXET_JWKS_TTL")
             && let Ok(ttl) = ttl.parse::<u64>()

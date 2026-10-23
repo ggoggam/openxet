@@ -89,7 +89,12 @@ same variables apply if you run the binary directly:
 | `OPENXET_S3_ALLOW_HTTP` | — | `true` |
 
 For authentication, configure OIDC issuers (`OPENXET_OIDC_ISSUERS`); clients then
-present bearer tokens from that provider. On the filesystem backend,
+present bearer tokens from that provider. A token needs one of the roles or
+scopes `openxet:read`, `openxet:write`, or `openxet:admin` (as an OAuth scope,
+a `roles` entry, or a Keycloak realm/client role; rename them with
+`OPENXET_OIDC_{READ,WRITE,ADMIN}_ROLE`). Tokens with none of them get 403. Set
+`OPENXET_OIDC_DEFAULT_SCOPE=write` to restore the old behavior where any token
+the issuer hands out can write. On the filesystem backend,
 reconstruction responses carry HMAC-signed, expiring xorb fetch URLs; set
 `OPENXET_XORB_URL_SECRET` to the same value on every replica so a URL signed by
 one verifies on another. Leave `OPENXET_AUTH_ENABLED=false`

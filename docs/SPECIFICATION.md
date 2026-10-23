@@ -319,8 +319,14 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
   signed with an asymmetric algorithm. The server verifies it against the
   issuer's JWKS (fetched via OIDC discovery and cached). Issuers are
   allow-listed in `auth.oidc_issuers`; `auth.oidc_audience` optionally pins
-  `aud`. Any valid token from an allowed issuer currently grants full
-  read/write — issuance is the access-control point.
+  `aud`. The token's OAuth `scope`, top-level `roles`, Keycloak realm roles
+  (`realm_access.roles`), and Keycloak client roles (`resource_access.*.roles`)
+  are matched against `auth.oidc_read_role` / `oidc_write_role` /
+  `oidc_admin_role` (defaults `openxet:read`, `openxet:write`,
+  `openxet:admin`; env `OPENXET_OIDC_{READ,WRITE,ADMIN}_ROLE`), and the
+  strongest match wins. A valid token with none of them is refused with `403`
+  unless `auth.oidc_default_scope` (`OPENXET_OIDC_DEFAULT_SCOPE`) names a
+  fallback scope.
 - **Fetch URLs** on reconstruction `fetch_info` entries are self-authenticating
   because xet-core fetches them with no `Authorization` header: cloud backends
   return a presigned object-store URL, and the filesystem backend returns the
@@ -333,9 +339,10 @@ issuance is external (like huggingface.co, where the Hub mints xet tokens):
   `Range` outside the span gets `403`. The `sig` value is redacted from
   request logs.
 - **Development:** `auth.enabled = false` (or `OPENXET_AUTH_ENABLED=false`)
-  skips all token checks; the server logs a loud warning.
+  skips all token checks and treats every request as admin; the server logs a
+  loud warning.
 
-Write scope supersedes read; middleware validates the Bearer `Authorization`
+Admin scope supersedes write, which supersedes read; middleware validates the Bearer `Authorization`
 header on all guarded `/v1/*` routes. `GET /v1/xorbs/default/{hash}` accepts
 either a signed fetch URL or a bearer token.
 
