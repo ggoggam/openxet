@@ -367,6 +367,11 @@ mise run dev:s3                    # exercise the S3 / presigned-URL path
 
 Integration tests validate against official reference files from the [xet-spec-reference-files](https://huggingface.co/datasets/xet-team/xet-spec-reference-files) dataset on HuggingFace. The files are downloaded on first run into a temp directory (override with `OPENXET_TEST_DATA_DIR`) and cover chunk hashing, file hashing, merkle tree construction, and xorb/shard deserialization.
 
+## Security
+
+Report vulnerabilities privately, as [SECURITY.md](SECURITY.md) describes, not in a public
+issue.
+
 ## License
 
 This project is licensed under the [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0).
